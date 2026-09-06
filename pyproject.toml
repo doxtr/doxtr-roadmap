@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "doxtr-roadmap"
+dynamic = ["version"]
+authors = [{ name="Jens Frey" }]
+description = "Sphinx extension that generates PlantUML Gantt roadmaps from CSV data."
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "sphinx>=5.0",
+    "sphinxcontrib-plantuml>=0.9",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Framework :: Sphinx :: Extension",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/doxtr/doxtr-roadmap"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "sphinxcontrib-xlink",
+    "doxtr-pdf-theme-core",
+]
+
+[tool.setuptools.packages.find]
+include = ["doxtr_roadmap*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "doxtr_roadmap.__version__"}
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-data]
+doxtr_roadmap = []
+
+[tool.pytest.ini_options]
+testpaths = ["test_harness", "tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+
+[tool.coverage.run]
+source = ["doxtr_roadmap"]
+omit = ["*/test_*", "*/conf*.py"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 75

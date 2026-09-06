@@ -1,0 +1,12 @@
+section,name,start,end,row_group,link,tags
+Periods,Set27-01,2026-11-09,2027-01-29,,,
+Periods,Set27-04,2027-02-01,2027-04-09,,,
+Periods,Set27-06,2027-04-12,2027-06-18,,,
+Work,Platform Migration,2026-12-01,2027-04-30,,,eng
+Work,Security Audit,2027-01-15,2027-01-29,,,security
+Work,New Onboarding,2027-01-29,2027-01-29,,,eng
+Work,API Redesign,2027-02-15,2027-06-01,wk1,https://example.com/api,eng code
+Work,Frontend Refresh,2027-03-01,2027-05-31,wk1,,code
+Work,Performance Review,2027-04-01,2027-04-09,,,
+Holidays,Winter Break,2027-01-01,2027-01-01,h1,
+Holidays,Spring Break,2027-04-10,2027-04-25,h2,

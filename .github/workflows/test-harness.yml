@@ -1,0 +1,63 @@
+name: Test Harness
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-harness:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: false
+          swap-storage: true
+
+      - uses: actions/checkout@v4
+
+      - name: Pull container image
+        run: docker pull doxtr/reactor:0.1.0
+
+      - name: Run test harness (HTML Sphinx build)
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/workspaces/docs \
+            -w /workspaces/docs \
+            doxtr/reactor:0.1.0 \
+            bash -c '
+              # Install doxtr-roadmap with dev extras; if doxtr-pdf-theme-core
+              # is unavailable on PyPI the install continues without it — the
+              # harness skips theme-core cases gracefully.
+              pip install -e /workspaces/docs[dev] 2>/dev/null || pip install -e /workspaces/docs &&
+              pip install sphinxcontrib-plantuml &&
+              cd test_harness &&
+              python test_runner.py
+            '
+
+      - name: Run unit tests
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/workspaces/docs \
+            -w /workspaces/docs \
+            doxtr/reactor:0.1.0 \
+            bash -c '
+              pip install -e /workspaces/docs[dev] 2>/dev/null || pip install -e /workspaces/docs &&
+              pip install pytest sphinxcontrib-plantuml &&
+              python -m pytest tests/ -v --tb=short
+            '
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-harness-html
+          path: test_harness/_build/html/
