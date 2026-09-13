@@ -664,6 +664,161 @@ def test_directive_no_width_option_does_not_set_node_width(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# :html-format: / :latex-format: output-format overrides
+# ---------------------------------------------------------------------------
+
+@skip_no_plantuml
+def test_directive_html_format_option_sets_node(tmp_path):
+    """:html-format: png sets node['html_format'] == 'png'."""
+    rst = textwrap.dedent("""\
+        .. roadmap::
+           :html-format: png
+           :start: 2026-01-01
+
+           section,name,start,end,row_group,link,tags
+           Work,Task A,2026-01-01,2026-06-30,,,
+    """)
+    app, warnings, src = _make_project(tmp_path, rst)
+    nodes = _get_plantuml_nodes(app)
+    assert len(nodes) == 1, f"Expected 1 plantuml node, warnings: {warnings}"
+    assert nodes[0].get("html_format") == "png", (
+        f"Expected node['html_format']=='png', got {nodes[0].get('html_format')!r}"
+    )
+
+
+@skip_no_plantuml
+def test_directive_latex_format_option_sets_node(tmp_path):
+    """:latex-format: png sets node['latex_format'] == 'png'."""
+    rst = textwrap.dedent("""\
+        .. roadmap::
+           :latex-format: png
+           :start: 2026-01-01
+
+           section,name,start,end,row_group,link,tags
+           Work,Task A,2026-01-01,2026-06-30,,,
+    """)
+    app, warnings, src = _make_project(tmp_path, rst)
+    nodes = _get_plantuml_nodes(app)
+    assert len(nodes) == 1, f"Expected 1 plantuml node, warnings: {warnings}"
+    assert nodes[0].get("latex_format") == "png", (
+        f"Expected node['latex_format']=='png', got {nodes[0].get('latex_format')!r}"
+    )
+
+
+@skip_no_plantuml
+def test_directive_no_format_option_leaves_node_unset(tmp_path):
+    """Without format options (and no config override), the node carries
+    neither html_format nor latex_format, so sphinxcontrib.plantuml falls
+    back to the project-wide plantuml_output_format setting."""
+    rst = textwrap.dedent("""\
+        .. roadmap::
+           :start: 2026-01-01
+
+           section,name,start,end,row_group,link,tags
+           Work,Task A,2026-01-01,2026-06-30,,,
+    """)
+    app, warnings, src = _make_project(tmp_path, rst)
+    nodes = _get_plantuml_nodes(app)
+    assert len(nodes) == 1, f"Expected 1 plantuml node, warnings: {warnings}"
+    assert "html_format" not in nodes[0], (
+        "html_format must not be set when no override is configured"
+    )
+    assert "latex_format" not in nodes[0], (
+        "latex_format must not be set when no override is configured"
+    )
+
+
+@skip_no_plantuml
+def test_directive_html_format_config_applies(tmp_path):
+    """doxtr_roadmap_html_format config value applies to the node when no
+    per-directive option is given."""
+    rst = textwrap.dedent("""\
+        .. roadmap::
+           :start: 2026-01-01
+
+           section,name,start,end,row_group,link,tags
+           Work,Task A,2026-01-01,2026-06-30,,,
+    """)
+    app, warnings, src = _make_project(
+        tmp_path, rst,
+        extra_conf="doxtr_roadmap_html_format = 'svg_obj'",
+    )
+    nodes = _get_plantuml_nodes(app)
+    assert len(nodes) == 1, f"Expected 1 plantuml node, warnings: {warnings}"
+    assert nodes[0].get("html_format") == "svg_obj", (
+        f"Expected node['html_format']=='svg_obj', got {nodes[0].get('html_format')!r}"
+    )
+
+
+@skip_no_plantuml
+def test_directive_latex_format_config_applies(tmp_path):
+    """doxtr_roadmap_latex_format config value applies to the node when no
+    per-directive option is given."""
+    rst = textwrap.dedent("""\
+        .. roadmap::
+           :start: 2026-01-01
+
+           section,name,start,end,row_group,link,tags
+           Work,Task A,2026-01-01,2026-06-30,,,
+    """)
+    app, warnings, src = _make_project(
+        tmp_path, rst,
+        extra_conf="doxtr_roadmap_latex_format = 'pdf'",
+    )
+    nodes = _get_plantuml_nodes(app)
+    assert len(nodes) == 1, f"Expected 1 plantuml node, warnings: {warnings}"
+    assert nodes[0].get("latex_format") == "pdf", (
+        f"Expected node['latex_format']=='pdf', got {nodes[0].get('latex_format')!r}"
+    )
+
+
+@skip_no_plantuml
+def test_directive_format_option_overrides_config(tmp_path):
+    """Per-directive :html-format: / :latex-format: win over the doxtr config
+    values."""
+    rst = textwrap.dedent("""\
+        .. roadmap::
+           :html-format: png
+           :latex-format: eps
+           :start: 2026-01-01
+
+           section,name,start,end,row_group,link,tags
+           Work,Task A,2026-01-01,2026-06-30,,,
+    """)
+    app, warnings, src = _make_project(
+        tmp_path, rst,
+        extra_conf=(
+            "doxtr_roadmap_html_format = 'svg_obj'\n"
+            "doxtr_roadmap_latex_format = 'pdf'"
+        ),
+    )
+    nodes = _get_plantuml_nodes(app)
+    assert len(nodes) == 1, f"Expected 1 plantuml node, warnings: {warnings}"
+    assert nodes[0].get("html_format") == "png"
+    assert nodes[0].get("latex_format") == "eps"
+
+
+@skip_no_plantuml
+def test_directive_bad_html_format_reports_error(tmp_path):
+    """An invalid :html-format: value is rejected with a directive error and
+    produces no plantuml node."""
+    rst = textwrap.dedent("""\
+        .. roadmap::
+           :html-format: bogus
+           :start: 2026-01-01
+
+           section,name,start,end,row_group,link,tags
+           Work,Task A,2026-01-01,2026-06-30,,,
+    """)
+    app, warnings, src = _make_project(tmp_path, rst)
+    nodes = _get_plantuml_nodes(app)
+    assert len(nodes) == 0, "Invalid :html-format: should not yield a plantuml node"
+    assert "html-format" in warnings, (
+        f"Expected an error mentioning html-format; got: {warnings[:500]}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Link appendix tests
 # ---------------------------------------------------------------------------
 
@@ -2114,3 +2269,440 @@ def test_file_option_single_path_still_works(tmp_path):
     nodes = _get_plantuml_nodes(app)
     assert len(nodes) == 1, f"Expected 1 plantuml node (backward compat); warnings: {warnings}"
     assert "@startgantt" in nodes[0]["uml"]
+
+
+# ---------------------------------------------------------------------------
+# D19. Directive-level integration tests
+# ---------------------------------------------------------------------------
+
+# D19(a): :period: current-quarter renders and clips to the current quarter.
+@skip_no_plantuml
+def test_directive_period_current_quarter(tmp_path):
+    """D19(a): ':period: current-quarter' renders a plantuml node clipped to
+    the current calendar quarter."""
+    import datetime
+    today = datetime.date.today()
+    q = (today.month - 1) // 3
+    q_start_month = q * 3 + 1
+    q_start = datetime.date(today.year, q_start_month, 1)
+    start_str = q_start.isoformat()
+
+    rst = textwrap.dedent(f"""\
+        .. roadmap::
+           :period: current-quarter
+
+           section,name,start,end,row_group,link,tags
+           Work,Task A,{start_str},{start_str},,,
+    """)
+    app, warnings, src = _make_project(tmp_path, rst)
+    nodes = _get_plantuml_nodes(app)
+    assert len(nodes) == 1, f"Expected 1 plantuml node; warnings: {warnings}"
+    uml = nodes[0]["uml"]
+    assert "@startgantt" in uml
+    assert start_str in uml, (
+        f"Expected quarter start date {start_str!r} in puml; got:\n{uml[:400]}"
+    )
+
+
+# D19(b): _load_calendar_rows round-trips CSV and skips invalid-date rows.
+def test_load_calendar_rows_round_trip(tmp_path):
+    """D19(b): _load_calendar_rows parses valid rows and silently skips bad-date rows."""
+    import datetime
+    from doxtr_roadmap.directive import RoadmapDirective
+
+    csv_text = textwrap.dedent("""\
+        section,name,start,end,row_group,link,tags
+        Sprints,Sprint 1,2026-01-01,2026-01-31,,,
+        Sprints,Sprint 2,2026-02-01,2026-02-28,,,
+        Sprints,Bad Row,not-a-date,2026-03-31,,,
+        Other,Other 1,2026-04-01,2026-04-30,,,
+    """)
+    csv_path = tmp_path / "calendar.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+
+    rows = RoadmapDirective._load_calendar_rows(str(csv_path))
+    # 3 valid rows; "Bad Row" has invalid start date and must be skipped.
+    assert len(rows) == 3, f"Expected 3 valid rows, got {len(rows)}: {rows}"
+    names = [r[0] for r in rows]
+    assert "Bad Row" not in names, "Row with invalid date must be skipped"
+    # Each row is a (name, start, end, section) 4-tuple.
+    for row in rows:
+        assert len(row) == 4
+        assert isinstance(row[1], datetime.date)
+        assert isinstance(row[2], datetime.date)
+    # Check section column is correctly populated.
+    sections = {r[0]: r[3] for r in rows}
+    assert sections["Sprint 1"] == "Sprints"
+    assert sections["Other 1"] == "Other"
+
+
+def test_load_calendar_rows_applies_ignore_options(tmp_path):
+    """Per-calendar FileOptions blank the named column at parse time; norender
+    is ignored for calendars (they never render bars)."""
+    from doxtr_roadmap.directive import RoadmapDirective
+    from doxtr_roadmap.file_options import FileOptions
+
+    csv_text = textwrap.dedent("""\
+        section,name,start,end,row_group,link,tags
+        Sprints,Sprint 1,2026-01-01,2026-01-31,,,plan
+        Sprints,Sprint 2,2026-02-01,2026-02-28,,,plan
+    """)
+    csv_path = tmp_path / "calendar.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+
+    # Ignoring section flattens rows into the unnamed section; norender=True
+    # must NOT drop calendar rows (they are still needed for period lookup).
+    opts = FileOptions(ignore_columns=frozenset({"section"}), norender=True)
+    rows = RoadmapDirective._load_calendar_rows(str(csv_path), opts)
+    assert len(rows) == 2, f"norender must not drop calendar rows; got {rows}"
+    assert all(r[3] == "" for r in rows), "section column should be blanked"
+
+
+# D19(c): _resolve_edge success, resolver-returns-None error, PeriodExprError path.
+def test_resolve_edge_success_and_errors():
+    """D19(c): _resolve_edge success path and both error paths."""
+    import datetime
+    import pytest
+    from doxtr_roadmap.directive import RoadmapDirective
+    from doxtr_roadmap.period_expr import ResolutionContext
+
+    ctx = ResolutionContext(
+        today=datetime.date(2026, 12, 15),
+        config={},
+        srcdir="/src",
+        docdir="doc",
+    )
+
+    def _warn(msg):
+        pass
+
+    # _resolve_edge is an instance method; call it unbound with a minimal
+    # sentinel self (it only uses self to call period_expr functions, not
+    # any directive-specific state).
+    # We use a simple lambda wrapper to call it directly on the class.
+    _re = RoadmapDirective._resolve_edge
+
+    # We need a minimal fake directive instance to call the instance method.
+    # The method only uses `self` to call `period_expr.resolve_period_token`,
+    # which does not touch `self` at all — so any object works as `self`.
+    class _FakeSelf:
+        pass
+    fake_self = _FakeSelf()
+
+    # Success: literal ISO date
+    d = _re(fake_self, "2027-01-01", ctx, _warn, edge="start")
+    assert d == datetime.date(2027, 1, 1)
+
+    # Success: start edge of a built-in expression window
+    d = _re(fake_self, "current-year", ctx, _warn, edge="start")
+    assert d == datetime.date(2026, 1, 1)
+
+    # Success: end edge
+    d = _re(fake_self, "current-year", ctx, _warn, edge="end")
+    assert d == datetime.date(2026, 12, 31)
+
+    # Error path: resolver returns None (unrecognised plain name) → ValueError.
+    with pytest.raises(ValueError, match="Invalid start date"):
+        _re(fake_self, "not-a-period", ctx, _warn, edge="start")
+
+    # Error path: PeriodExprError (invalid hook path syntax) is wrapped in ValueError.
+    ctx_bad_hook = ResolutionContext(
+        today=datetime.date(2026, 12, 15),
+        config={"period_resolver_hooks": ["myfunc"]},  # no module part → PeriodExprError
+        srcdir="/src",
+        docdir="doc",
+    )
+    with pytest.raises(ValueError, match="Invalid start date"):
+        _re(fake_self, "bad-token", ctx_bad_hook, _warn, edge="start")
+
+
+# ---------------------------------------------------------------------------
+# mark_image_dark_ready per-file registration (8a block)
+# ---------------------------------------------------------------------------
+
+# Expected filename scheme: plantuml-<sha1(incdir + b"\0" + uml)>.png
+# (mirrors sphinxcontrib.plantuml's own hash computation)
+
+
+def _compute_expected_png(incdir: str, uml: str) -> str:
+    """Re-compute the plantuml output filename the same way directive.py does."""
+    import hashlib
+    key = hashlib.sha1()
+    key.update(incdir.encode("utf-8"))
+    key.update(b"\0")
+    key.update(uml.encode("utf-8"))
+    return f"plantuml-{key.hexdigest()}.png"
+
+
+@skip_no_plantuml
+def test_mark_image_dark_ready_called_with_exact_filename(tmp_path, monkeypatch):
+    """mark_image_dark_ready is called with the exact plantuml-<sha1>.png
+    filename derived from sha1(incdir + '\\0' + uml)."""
+    calls = []
+
+    def _fake_mark(app, fname):
+        calls.append(fname)
+
+    monkeypatch.setattr(
+        "doxtr_pdf_theme_core.mark_image_dark_ready", _fake_mark, raising=False
+    )
+
+    rst = textwrap.dedent("""\
+        .. roadmap::
+           :start: 2026-01-01
+
+           section,name,start,end,row_group,link,tags
+           Work,Task A,2026-01-01,2026-06-30,,,
+    """)
+    app, warnings, src = _make_project(tmp_path, rst)
+    nodes = _get_plantuml_nodes(app)
+    assert len(nodes) == 1, f"Expected 1 plantuml node; warnings: {warnings}"
+
+    node = nodes[0]
+    expected = _compute_expected_png(node["incdir"], node["uml"])
+
+    assert expected in calls, (
+        f"Expected mark_image_dark_ready to be called with {expected!r}; "
+        f"actual calls: {calls}"
+    )
+
+
+@skip_no_plantuml
+def test_mark_image_dark_ready_absent_does_not_raise(tmp_path, monkeypatch):
+    """When mark_image_dark_ready is absent from theme-core (delattr),
+    the directive runs without raising any exception."""
+    try:
+        import doxtr_pdf_theme_core as _core
+        monkeypatch.delattr(_core, "mark_image_dark_ready", raising=False)
+    except ImportError:
+        pass  # theme-core not installed at all — equivalent scenario
+
+    rst = textwrap.dedent("""\
+        .. roadmap::
+           :start: 2026-01-01
+
+           section,name,start,end,row_group,link,tags
+           Work,Task A,2026-01-01,2026-06-30,,,
+    """)
+    # Should build cleanly, no errors
+    app, warnings, src = _make_project(tmp_path, rst)
+    nodes = _get_plantuml_nodes(app)
+    assert len(nodes) == 1, (
+        f"Directive must succeed even when mark_image_dark_ready is absent; "
+        f"warnings: {warnings}"
+    )
+
+
+@skip_no_plantuml
+def test_mark_image_dark_ready_exactly_one_per_directive(tmp_path, monkeypatch):
+    """Exactly ONE filename is registered per roadmap directive invocation
+    (per-file, not a blanket glob). The filename starts with 'plantuml-'
+    and ends with '.png'."""
+    calls = []
+
+    def _fake_mark(app, fname):
+        calls.append(fname)
+
+    monkeypatch.setattr(
+        "doxtr_pdf_theme_core.mark_image_dark_ready", _fake_mark, raising=False
+    )
+
+    rst = textwrap.dedent("""\
+        .. roadmap::
+           :start: 2026-01-01
+
+           section,name,start,end,row_group,link,tags
+           Work,Task A,2026-01-01,2026-06-30,,,
+    """)
+    app, warnings, src = _make_project(tmp_path, rst)
+    nodes = _get_plantuml_nodes(app)
+    assert len(nodes) == 1, f"Expected 1 plantuml node; warnings: {warnings}"
+
+    assert len(calls) == 1, (
+        f"Expected exactly 1 mark_image_dark_ready call (per-file, not glob); "
+        f"got {len(calls)}: {calls}"
+    )
+    registered = calls[0]
+    assert registered.startswith("plantuml-"), (
+        f"Registered filename must start with 'plantuml-'; got {registered!r}"
+    )
+    assert registered.endswith(".png"), (
+        f"Registered filename must end with '.png'; got {registered!r}"
+    )
+    # Must NOT be a glob pattern
+    assert "*" not in registered, (
+        f"Registered filename must be exact (no glob wildcards); got {registered!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Per-file :file: options: column suppression + norender
+# ---------------------------------------------------------------------------
+
+from doxtr_roadmap.directive import _split_file_specs
+
+
+def test_split_file_specs_plain():
+    assert _split_file_specs("a.csv b.csv") == ["a.csv", "b.csv"]
+    assert _split_file_specs("a.csv, b.csv") == ["a.csv", "b.csv"]
+    assert _split_file_specs("sprints/*.csv") == ["sprints/*.csv"]
+
+
+def test_split_file_specs_keeps_bracket_commas():
+    assert _split_file_specs("a.csv[ignore=section,link] b.csv[norender]") == [
+        "a.csv[ignore=section,link]",
+        "b.csv[norender]",
+    ]
+
+
+def test_split_file_specs_comma_separated_with_brackets():
+    assert _split_file_specs("a.csv[ignore=x,y], b.csv") == [
+        "a.csv[ignore=x,y]",
+        "b.csv",
+    ]
+
+
+TWO_FILE_CSV_A = textwrap.dedent("""\
+    section,name,start,end,row_group,link,tags
+    Work,Task X,2026-12-01,2027-01-15,,https://example.com/x,eng
+""")
+
+TWO_FILE_CSV_B = textwrap.dedent("""\
+    section,name,start,end,row_group,link,tags
+    Planning,Task Y,2027-02-15,2027-04-01,,https://example.com/y,security
+""")
+
+
+def _make_two_file_project(tmp_path, rst_body, extra_conf=""):
+    """Like _make_project but writes a.csv and b.csv (no roadmap.csv)."""
+    from sphinx.application import Sphinx
+    src = tmp_path / "src"
+    src.mkdir()
+    out = tmp_path / "_build" / "xml"
+    out.mkdir(parents=True)
+    doctrees = tmp_path / "_build" / ".doctrees"
+    doctrees.mkdir(parents=True)
+    (src / "a.csv").write_text(TWO_FILE_CSV_A, encoding="utf-8")
+    (src / "b.csv").write_text(TWO_FILE_CSV_B, encoding="utf-8")
+    (src / "conf.py").write_text(
+        textwrap.dedent("""\
+            project = 'Test'
+            extensions = ['sphinxcontrib.plantuml', 'doxtr_roadmap']
+            plantuml = 'plantuml'
+            plantuml_output_format = 'png'
+            master_doc = 'index'
+        """) + extra_conf + "\n",
+        encoding="utf-8",
+    )
+    (src / "index.rst").write_text("Test\n====\n\n" + rst_body + "\n", encoding="utf-8")
+    warning_stream = io.StringIO()
+    app = Sphinx(
+        srcdir=str(src), confdir=str(src), outdir=str(out),
+        doctreedir=str(doctrees), buildername="xml", freshenv=True,
+        warning=warning_stream, verbosity=0,
+    )
+    app.build()
+    return app, warning_stream.getvalue(), src
+
+
+@skip_no_plantuml
+def test_directive_ignore_section_per_file(tmp_path):
+    """Ignoring `section` in only one file flattens that file's rows while the
+    other file keeps its section header."""
+    rst = textwrap.dedent("""\
+        .. roadmap::
+           :file: a.csv[ignore=section] b.csv
+    """)
+    app, warnings, src = _make_two_file_project(tmp_path, rst)
+    nodes = _get_plantuml_nodes(app)
+    assert len(nodes) == 1, f"warnings: {warnings}"
+    uml = nodes[0]["uml"]
+    # b.csv keeps its section header; a.csv's is suppressed.
+    assert "-- Planning --" in uml
+    assert "-- Work --" not in uml
+
+
+@skip_no_plantuml
+def test_directive_ignore_link_suppresses_link(tmp_path):
+    rst = textwrap.dedent("""\
+        .. roadmap::
+           :file: a.csv[ignore=link] b.csv
+    """)
+    app, warnings, src = _make_two_file_project(tmp_path, rst)
+    uml = _get_plantuml_nodes(app)[0]["uml"]
+    assert "https://example.com/x" not in uml  # a.csv link suppressed
+    assert "https://example.com/y" in uml      # b.csv link kept
+
+
+@skip_no_plantuml
+def test_directive_norender_excludes_bars(tmp_path):
+    """A norender file contributes no bars but is still read."""
+    rst = textwrap.dedent("""\
+        .. roadmap::
+           :file: a.csv[norender] b.csv
+    """)
+    app, warnings, src = _make_two_file_project(tmp_path, rst)
+    uml = _get_plantuml_nodes(app)[0]["uml"]
+    assert "[Task Y]" in uml       # b.csv rendered
+    assert "[Task X]" not in uml   # a.csv norender
+
+
+@skip_no_plantuml
+def test_directive_bad_ignore_column_reports_error(tmp_path):
+    rst = textwrap.dedent("""\
+        .. roadmap::
+           :file: a.csv[ignore=name]
+    """)
+    app, warnings, src = _make_two_file_project(tmp_path, rst)
+    # The bad column surfaces as a docutils ERROR (reported via the directive's
+    # reporter); assert on the captured warning stream.
+    assert "cannot be ignored" in warnings
+
+
+@skip_no_plantuml
+def test_directive_norender_period_still_resolves(tmp_path):
+    """A norender reference file's period name is usable in :period: even
+    though its rows are not rendered as bars."""
+    from sphinx.application import Sphinx
+    src = tmp_path / "src"
+    src.mkdir()
+    out = tmp_path / "_build" / "xml"
+    out.mkdir(parents=True)
+    doctrees = tmp_path / "_build" / ".doctrees"
+    doctrees.mkdir(parents=True)
+    (src / "periods.csv").write_text(textwrap.dedent("""\
+        section,name,start,end,row_group,link,tags
+        Periods,Set27-01,2026-11-09,2027-01-29,,,
+    """), encoding="utf-8")
+    (src / "work.csv").write_text(textwrap.dedent("""\
+        section,name,start,end,row_group,link,tags
+        Work,Task X,2026-12-01,2027-01-15,,,eng
+    """), encoding="utf-8")
+    (src / "conf.py").write_text(textwrap.dedent("""\
+        project = 'Test'
+        extensions = ['sphinxcontrib.plantuml', 'doxtr_roadmap']
+        plantuml = 'plantuml'
+        plantuml_output_format = 'png'
+        master_doc = 'index'
+    """), encoding="utf-8")
+    (src / "index.rst").write_text(textwrap.dedent("""\
+        Test
+        ====
+
+        .. roadmap::
+           :file: periods.csv[norender] work.csv
+           :period: Set27-01
+    """), encoding="utf-8")
+    ws = io.StringIO()
+    app = Sphinx(str(src), str(src), str(out), str(doctrees), "xml",
+                 freshenv=True, warning=ws, verbosity=0)
+    app.build()
+    nodes = _get_plantuml_nodes(app)
+    assert len(nodes) == 1, f"warnings: {ws.getvalue()}"
+    uml = nodes[0]["uml"]
+    # Period name resolved → project starts at the period's start date.
+    assert "Project starts 2026-11-09" in uml
+    # But the period rows themselves are NOT rendered as bars.
+    assert "[Set27-01]" not in uml
+    # The work file IS rendered.
+    assert "[Task X]" in uml

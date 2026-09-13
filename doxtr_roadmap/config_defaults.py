@@ -5,6 +5,8 @@ defaults.  ``_deep_merge`` is used to layer directive-level overrides on top of
 the global Sphinx config dict before passing to :func:`generator.generate_puml`.
 """
 
+from .csv_parser import DEFAULT_IGNORABLE_COLUMNS
+
 DEFAULT_CONFIG = {
     # ----- Generation defaults ----------------------------------------
     # Default timeline unit: daily | weekly | monthly
@@ -29,6 +31,23 @@ DEFAULT_CONFIG = {
         "undone_color": "#FFF3E0",
         "frame_color": None,
     },
+
+    # ----- Diagram-level background -----------------------------------
+    # PlantUML ganttDiagram BackGroundColor. None → PlantUML default (white).
+    # The theme-core adapter sets this to the dark page colour when the core
+    # reports dark mode is active, so the generated Gantt renders on a dark
+    # background that matches the rest of the PDF (rather than relying on the
+    # core's lossy per-pixel image inversion).
+    "diagram_background_color": None,
+
+    # ----- Diagram-level foreground -----------------------------------
+    # PlantUML ganttDiagram root FontColor + LineColor. None → PlantUML
+    # defaults (black). The theme-core adapter sets this to a readable light
+    # colour in dark mode. This is the single lever that makes the timeline
+    # header (year/month) and milestone labels legible on a dark background —
+    # PlantUML ignores the more specific timeline.*/milestone FontColor
+    # selectors but honours the root FontColor for those elements.
+    "foreground_color": None,
 
     # ----- Per-section bar colours ------------------------------------
     # Keyed by exact section name. Each entry may set "done", "frame",
@@ -90,6 +109,76 @@ DEFAULT_CONFIG = {
     # Optional default caption text used when figure=True and no per-
     # directive :caption: is present.  None → fall back to chart title.
     "figure_caption": None,
+
+    # ----- Dynamic period expressions -------------------------------------
+    # CSV-backed "named period" calendars.  Maps a trigger keyword (used in
+    # :period: / :start: / :end:) to a calendar spec that resolves to a date
+    # window by locating the row whose [start, end] brackets a reference date.
+    #
+    # Each value is either a bare file path string or a dict:
+    #   {
+    #     "file":      "path/to/calendar.csv",   # required
+    #     "section":   "PI Rhythm",              # optional CSV section filter
+    #     "match":     "contains",               # contains (default)
+    #     "on_miss":   "future",                 # future (default) | past | error
+    #     "reference": "now()",                  # optional date expression anchor
+    #   }
+    #
+    # Example:
+    #   "period_calendars": {
+    #       "current-pi": {"file": "files/pi-calendar.csv", "section": "PI Rhythm"},
+    #   }
+    "period_calendars": {},
+
+    # Per-calendar processing options, keyed by the same trigger keyword used
+    # in ``period_calendars``.  Each value is an option string using the same
+    # grammar as the per-file ``:file:`` bracket (see file_options.py), e.g.
+    #   {"current-pi": "ignore=tags,link"}
+    # Since period calendars only ever supply date windows (they never render
+    # bars), the ``norender`` flag is implicit; ``ignore=`` lets you drop
+    # columns from calendar parsing for consistency with :file: options.
+    "period_calendars_options": {},
+
+    # Columns a user is allowed to suppress via a per-file ``ignore=`` option
+    # (and via ``period_calendars_options``).  Defaults to every non-required
+    # column; the strictly-required columns (name/start/end) can never be
+    # ignored regardless of this list.  Exposed as config so new columns added
+    # in future can be made ignorable without a code change.
+    "ignorable_columns": list(DEFAULT_IGNORABLE_COLUMNS),
+
+    # Advanced: dotted paths to callables (token, ctx) -> (start, end) | date
+    # | None, tried before the built-in resolvers so users can override any
+    # built-in behaviour.  Example: ["mypkg.roadmap_ext.fiscal_year"].
+    "period_resolver_hooks": [],
+
+    # Business-day definition used by relative expressions such as
+    # "now()-45 businessdays".  None → Monday–Friday.  Otherwise a list of
+    # weekday names (case-insensitive; full or common abbreviations) or
+    # integers (Mon=0 .. Sun=6), e.g. ["monday", "wednesday", "saturday"] or
+    # [0, 2, 5] for a Mon/Wed/Sat working week.
+    "business_days": None,
+
+    # ----- PlantUML output format overrides ------------------------------
+    # Override the sphinxcontrib.plantuml output format specifically for
+    # roadmap diagrams, leaving the format of ordinary ``.. uml::`` blocks
+    # untouched.
+    #
+    # These map directly onto the per-node ``html_format`` / ``latex_format``
+    # attributes that sphinxcontrib.plantuml already honours (they take
+    # precedence over the global ``plantuml_output_format`` /
+    # ``plantuml_latex_output_format`` settings).
+    #
+    #   None (default) → do not override; defer to the sphinxcontrib.plantuml
+    #                    global setting (so a project configured for
+    #                    ``svg_obj`` renders roadmaps as ``svg_obj`` too).
+    #   str            → force this format for every roadmap, e.g. "png".
+    #
+    # Valid html values mirror sphinxcontrib.plantuml:
+    #   "png", "svg", "svg_img", "svg_obj", "none".
+    # Valid latex values mirror sphinxcontrib.plantuml:
+    #   "eps", "pdf", "eps_pdf", "svg_pdf", "png", "tikz".
+    "html_format": None,
+    "latex_format": None,
 
     # ----- Link appendix --------------------------------------------------
     # Render task links as real docutils nodes appended after the chart image.

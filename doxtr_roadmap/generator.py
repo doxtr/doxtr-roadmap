@@ -195,6 +195,24 @@ def _build_style_block(config: dict) -> list:
     """
     fonts = config.get("fonts", {})
     lines = ["<style>", "ganttDiagram {"]
+    # Diagram-level background colour. Emitted only when explicitly set (e.g. by
+    # the theme adapter in dark mode). PlantUML otherwise defaults to white, so
+    # omitting this key preserves the historical light-background behaviour.
+    diagram_bg = config.get("diagram_background_color")
+    if diagram_bg:
+        lines.append(f"   BackGroundColor {diagram_bg}")
+    # Diagram-level foreground colour. Emitted as a root-level FontColor +
+    # LineColor on the ganttDiagram element. This is the single lever that
+    # makes the timeline header row (year/month) and milestone labels legible
+    # on a dark background: PlantUML (as of v1.2026.x) ignores the more
+    # specific ``timeline.*`` and ``milestone`` FontColor style selectors, but
+    # honours the root FontColor for those elements. Emitted only when set
+    # (the theme adapter sets it in dark mode); omitting it preserves the
+    # historical light-mode defaults.
+    foreground = config.get("foreground_color")
+    if foreground:
+        lines.append(f"   FontColor {foreground}")
+        lines.append(f"   LineColor {foreground}")
     # Font selectors mapped to PlantUML ganttDiagram style keys.
     for selector, key in (
         ("task", "task"),

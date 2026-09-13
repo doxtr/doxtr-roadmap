@@ -78,6 +78,44 @@ Both examples produce the **same** combined roadmap.  Key rules:
   an existing glob is not detected automatically — run `make clean html`
   after adding files to a glob pattern.
 
+### Per-file options: ignoring columns and reference-only files
+
+Each `:file:` spec may carry per-file processing options in a `[...]` bracket
+appended directly after the filename (or glob).  Options are `;`-separated;
+each is either a bare flag or a `key=value` pair whose value is a
+comma-separated list:
+
+```rst
+.. roadmap::
+   :file: sprints/sprint-01.csv[ignore=section,link] sprints/sprint-02.csv
+```
+
+This lets you keep every column fully documented in the CSV while suppressing
+non-essential ones from a *specific* file's rendering. Options apply to every
+file a glob matches and are independent per spec, so a column can be ignored
+in one file but kept in another.
+
+Supported options:
+
+- **`ignore=<col>[,<col>...]`** — blank the named column(s) for that spec's
+  rows at parse time. The suppression is uniform: an ignored `tags`/`link`
+  column is invisible to `:tags:` / `:query:` filtering and the link appendix,
+  an ignored `section` flattens those rows (no section header, and they no
+  longer parent subtasks), and an ignored `row_group` drops those rows from
+  same-row grouping. Only non-essential columns may be ignored — see
+  [`doxtr_roadmap_ignorable_columns`](#configuration); attempting to ignore
+  `name`, `start`, or `end` is an error.
+- **`norender`** (flag) — load and parse the file (so its rows stay documented
+  and remain usable for a *named* `:period:` / `:start:` / `:end:`) but emit
+  **no bars** from it. Useful to load a period-calendar file purely as a
+  reference for a named time frame without drawing its periods:
+
+  ```rst
+  .. roadmap::
+     :file: files/pi-calendar.csv[norender] files/work.csv
+     :period: Set27-01        # resolves against the norender calendar file
+  ```
+
 
 
 The CSV must have a header row.  Only `name`, `start`, and `end` are
@@ -107,12 +145,12 @@ Milestones are never clamped to the clip window.
 
 | Option           | Type              | Description |
 |------------------|-------------------|-------------|
-| `:file:`         | path(s)/glob(s)   | One or more CSV paths and/or glob patterns, space- or comma-separated. All matched files are combined into a single roadmap (sections merge by name; subtasks and row-groups work across files). Glob metacharacters (`*`, `?`, `[…]`) are expanded; within each glob matches are sorted lexicographically. A single path with no separators behaves as before. |
+| `:file:`         | path(s)/glob(s)   | One or more CSV paths and/or glob patterns, space- or comma-separated. All matched files are combined into a single roadmap (sections merge by name; subtasks and row-groups work across files). Glob metacharacters (`*`, `?`, `[…]`) are expanded; within each glob matches are sorted lexicographically. A single path with no separators behaves as before. Each spec may carry per-file options in a trailing `[...]` bracket — `ignore=<col>[,<col>...]` to blank non-essential columns at parse time, and/or the `norender` flag to load a file for reference (e.g. named `:period:` lookup) without drawing it. See [Per-file options](#per-file-options-ignoring-columns-and-reference-only-files). |
 | `:title:`        | string            | Override diagram title |
 | `:scale:`        | choice            | `daily`, `weekly`, `monthly` |
-| `:start:`        | ISO date          | Clip window start |
-| `:end:`          | ISO date          | Clip window end |
-| `:period:`       | string            | Comma-separated period name(s) to zoom to |
+| `:start:`        | ISO date / expr   | Clip window start. Accepts an ISO date or a [dynamic expression](#dynamic-period-expressions) (`now()-63 businessdays`, `current-quarter`, a calendar keyword) resolved to its start edge |
+| `:end:`          | ISO date / expr   | Clip window end. Accepts an ISO date or a [dynamic expression](#dynamic-period-expressions) resolved to its end edge |
+| `:period:`       | string            | Comma-separated period name(s) to zoom to. Each token may be a CSV period name or a [dynamic expression](#dynamic-period-expressions) (`current-pi`, `current-quarter`, `now()-2 weeks`) |
 | `:close-weekends:` | flag            | Force weekend closure |
 | `:clean-style:`    | true/false      | Override `clean_style` for this directive; bare flag or `true` enables, `false` disables (see [clean_style](#clean_style-and-the-hide-column-directives)) |
 | `:tags:`         | string            | Tag filter (nested `[ ]` / `!` / `!!` syntax) |
@@ -140,6 +178,113 @@ date range. Multiple periods are comma-separated:
 
 When exactly one distinct period is rendered and `:scale:` is not set, the
 extension automatically switches to `daily` scale and closes weekends.
+
+### Dynamic period expressions
+
+`:period:`, `:start:` and `:end:` accept **dynamic expressions** in addition
+to literal ISO dates and CSV period names. Each comma-separated token is
+resolved in this order (the first match wins):
+
+1. A literal ISO date (`2027-03-01`) — unchanged behaviour.
+2. A user resolver hook (`doxtr_roadmap_period_resolver_hooks`).
+3. A CSV-backed calendar keyword (`doxtr_roadmap_period_calendars`).
+4. A built-in calendar-math or relative expression.
+5. Otherwise the token is treated as a plain CSV period name (unchanged
+   behaviour, so existing roadmaps keep working).
+
+This lets a roadmap re-render itself against the *current* period every build
+without editing the RST:
+
+```rst
+.. roadmap::
+   :file: files/roadmap.csv
+   :period: current-pi
+
+.. roadmap::
+   :file: files/roadmap.csv
+   :start: now()-63 businessdays
+   :end: current-quarter
+
+.. roadmap::
+   :file: files/roadmap.csv
+   :period: current-pi, current-quarter
+```
+
+#### Built-in calendar-math tokens (no configuration)
+
+| Token | Window |
+|-------|--------|
+| `current-year` | Jan 1 – Dec 31 of the current year |
+| `current-quarter` | first–last day of the current calendar quarter |
+| `current-month` | first–last day of the current month |
+| `current-week` | Monday–Sunday of the current ISO week |
+| `now()` / `today` | today (a zero-width window) |
+
+#### Relative expressions (no configuration)
+
+```
+(now() | today) ([+-] <int> <unit>)*
+```
+
+where `<unit>` is `day(s)`, `week(s)`, `month(s)`, `year(s)` or
+`businessday(s)` (also spelled `business day` / `business-day`). Terms may be
+chained: `now() + 1 month - 3 businessdays`. Expressions are parsed by a small
+hand-written grammar, **not** `eval` (same security posture as `:query:`).
+
+Business days default to Monday–Friday and are configurable — see
+`doxtr_roadmap_business_days` below (supports arbitrary working weeks such as
+Mon/Wed/Sat).
+
+#### CSV-backed calendars (`current-pi` and friends)
+
+Map a trigger keyword to a calendar CSV once in `conf.py`; the keyword then
+resolves to whichever row's `[start, end]` brackets the reference date. The
+calendar data lives in its own file (or an existing roadmap CSV filtered by
+`section`), so it is configured once and reused by every directive:
+
+```python
+doxtr_roadmap_period_calendars = {
+    "current-pi": {
+        "file": "files/pi-calendar.csv",   # required
+        "section": "PI Rhythm",            # optional CSV section filter
+        "on_miss": "future",               # future (default) | past | error
+        # "match":     "contains",         # row-match mode (only "contains" currently supported)
+        # "reference": "now()",            # optional anchor (date or expression)
+    },
+    # A team using sprints instead of PIs:
+    # "current-sprint": {"file": "planning/sprints.csv"},
+}
+```
+
+The calendar CSV uses the same format as a roadmap CSV (`section,name,start,end`);
+a dedicated file may contain only the period rows.
+
+**Gap handling.** When the reference date falls in a gap between periods (or
+before/after all of them), `on_miss` decides the fallback and a warning is
+emitted:
+
+- `future` (default) — use the next upcoming period.  When there is no
+  upcoming period (reference is after the last row), falls back to the most
+  recent past period.
+- `past` — use the most recent past period.  When there is no past period
+  (reference is before the first row), falls back to the next upcoming period.
+- `error` — fail the build.
+
+#### Custom resolver hooks (advanced)
+
+For anything the built-ins do not cover (fiscal calendars, custom business
+logic), register dotted paths to callables `(token, ctx) -> (start, end) |
+date | None`. Hooks run *before* the built-ins, so they can override any
+built-in keyword:
+
+```python
+doxtr_roadmap_period_resolver_hooks = [
+    "mypackage.roadmap_ext.fiscal_year_resolver",
+]
+```
+
+A hook returns a `datetime.date`, a `(start, end)` date pair, or `None` to
+decline the token.
 
 ### Tag filter
 
@@ -217,6 +362,14 @@ doxtr_roadmap_collision_gap_days = 2              # minimum gap between tasks on
 # Column zoom — widen each gantt time column (default 1 = unchanged)
 doxtr_roadmap_column_zoom = 1
 
+# Diagram background colour override (theme-core dark mode sets this
+# automatically in dark builds; override manually when needed).
+doxtr_roadmap_diagram_background_color = None  # None = auto; set a hex colour like "#101010" to override
+
+# Diagram foreground colour override (root FontColor + LineColor; theme-core
+# dark mode sets this automatically in dark builds).
+doxtr_roadmap_foreground_color = None  # None = auto; set a hex colour like "#DBDBDB" to override
+
 # Link appendix — render task links as a list below the chart.
 # Defaults to "list" but only for PDF/latex (see builders below); set to
 # False to disable it everywhere including PDF.
@@ -230,6 +383,37 @@ doxtr_roadmap_figure = False
 # Optional default caption when doxtr_roadmap_figure=True and no :caption: given.
 # None → use the chart title as the caption.
 doxtr_roadmap_figure_caption = None
+
+# Dynamic period expressions (see "Dynamic period expressions" above)
+# CSV-backed "current period" calendars. Maps a :period:/:start:/:end:
+# trigger keyword to a calendar CSV whose row bracketing the reference date
+# defines the window.
+doxtr_roadmap_period_calendars = {}
+#   e.g. {"current-pi": {"file": "files/pi-calendar.csv",
+#                        "section": "PI Rhythm",
+#                        "on_miss": "future"}}   # future | past | error
+
+# Per-calendar processing options, keyed by the same trigger keyword used in
+# doxtr_roadmap_period_calendars. Each value is an option string using the
+# same grammar as the per-file :file: bracket (ignore=col1,col2). Since
+# calendars never render bars, the norender flag is implicit here.
+#   e.g. {"current-pi": "ignore=tags,link"}
+doxtr_roadmap_period_calendars_options = {}
+
+# Columns a user may suppress via a per-file `ignore=` option (and via
+# doxtr_roadmap_period_calendars_options). Defaults to every non-required
+# column; name/start/end can never be ignored regardless of this list.
+doxtr_roadmap_ignorable_columns = ["section", "row_group", "link", "tags"]
+
+# Advanced: dotted paths to custom resolver callables (token, ctx) ->
+# (start, end) | date | None, tried before the built-in resolvers.
+doxtr_roadmap_period_resolver_hooks = []
+
+# Business-day definition for "now()-N businessdays" expressions.
+# None → Monday–Friday. Otherwise a list of weekday names (case-insensitive,
+# full or common abbreviations) or integers (Mon=0 .. Sun=6), e.g.
+# ["monday", "wednesday", "saturday"] or [0, 2, 5] for a Mon/Wed/Sat week.
+doxtr_roadmap_business_days = None
 
 # Tag allow-lists (optional)
 doxtr_roadmap_allowed_tags = {
@@ -257,6 +441,53 @@ doxtr_roadmap_use_theme_core = "auto"  # "auto" | True | False
 | `sans_font`  | separator font name  |
 
 User-configured `doxtr_roadmap_*` values always win over theme-core.
+
+#### Dark mode
+
+When theme-core dark mode is active (a genuinely dark page — `doxtr_dark_mode`
+on with the resolved `invert` strategy), the roadmap extension generates its
+PlantUML source with dark-appropriate colours directly:
+
+| Dark source                    | Maps to                                  |
+|--------------------------------|------------------------------------------|
+| dark palette `primary`         | bar `done_color`                         |
+| dark palette `secondary`       | today line `color`                       |
+| dark palette `page`            | diagram `BackGroundColor` (dark)         |
+| theme-core dark context `text_color` | root `FontColor`/`LineColor` (title, timeline header, milestone & task labels) |
+| soft-inverted `undone_color`   | remaining-work bar background (dark, so light in-bar labels read) |
+| dark context `text_color` or dark `primary` | bar `frame_color` (subtle light border) |
+
+The root `FontColor`/`LineColor` is the single lever that makes the timeline
+header row (year/month) and milestone labels legible: PlantUML ignores the
+more specific `timeline.*` / `milestone` font-colour selectors but honours the
+root colour for those elements. The title colour is applied via inline creole
+(`<color:...>`), since the gantt `title` style selector is also ignored.
+
+Because the diagram is *regenerated* from dark source, the result matches the
+rest of the dark PDF exactly — unlike relying on theme-core's per-pixel image
+inversion (which cannot help roadmap because it generates PlantUML source
+inline, with no `_dark` source file to swap).
+
+The extension registers each generated PNG with theme-core's public
+`mark_image_dark_ready()` API (using the exact `plantuml-<hash>.png` filename
+that sphinxcontrib.plantuml will produce) so theme-core's dark image pipeline
+skips *only* the roadmap-generated diagrams. This is necessary because a dark,
+largely-achromatic Gantt would otherwise be misclassified as grayscale
+line-art and remapped, inverting its colours. It is a precise per-file skip —
+hand-authored `.. uml::` diagrams (which *do* need dark recolouring) are
+unaffected. (A blanket `plantuml-*.png` exclude would wrongly suppress those
+hand-authored diagrams, so it is deliberately not used.)
+
+Requires theme-core ≥ 1.1.9 (which exposes the public `get_dark_mode_context`
+and `mark_image_dark_ready` helpers). Older cores degrade
+gracefully: the roadmap falls back to the light palette in dark builds.
+
+Override the diagram background explicitly if needed:
+
+```python
+doxtr_roadmap_diagram_background_color = "#101010"  # None = auto (dark page in dark mode)
+doxtr_roadmap_foreground_color = "#DBDBDB"  # None = auto (theme-core text colour in dark mode)
+```
 
 ### xlink integration
 

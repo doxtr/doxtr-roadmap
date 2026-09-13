@@ -30,6 +30,23 @@ from typing import NamedTuple, Optional
 
 
 # ---------------------------------------------------------------------------
+# Column model
+# ---------------------------------------------------------------------------
+
+#: Canonical CSV column names understood by the parser.
+COLUMNS = ("section", "name", "start", "end", "row_group", "link", "tags")
+
+#: Columns that are strictly required to render a bar and therefore may never
+#: be blanked via a per-file ``ignore=`` option.  ``section`` is not required
+#: (rows with a blank section simply render without a ``-- ... --`` header).
+REQUIRED_COLUMNS = frozenset({"name", "start", "end"})
+
+#: Default set of columns a user may suppress per-file (everything that is not
+#: strictly required).  Surfaced as the ``ignorable_columns`` config default.
+DEFAULT_IGNORABLE_COLUMNS = tuple(c for c in COLUMNS if c not in REQUIRED_COLUMNS)
+
+
+# ---------------------------------------------------------------------------
 # TaskItem — typed NamedTuple replacing raw positional tuples  [E-1]
 # ---------------------------------------------------------------------------
 
@@ -74,7 +91,7 @@ class TaskItem(NamedTuple):
 # Public API
 # ---------------------------------------------------------------------------
 
-def load_items_from_files(paths) -> list:
+def load_items_from_files(paths, options=None) -> list:
     """Load roadmap items from **multiple** CSV files, combining them as one.
 
     All files are treated as a single roadmap: sections with the same name
@@ -92,25 +109,88 @@ def load_items_from_files(paths) -> list:
     independently — :func:`_parse_rows` uses ``row.get(col, "")`` throughout.
     Empty or header-only files contribute zero rows without raising.
 
+    Per-file processing options
+    ---------------------------
+    *options*, when given, is a parallel iterable aligned with *paths*.  Each
+    element is either ``None`` (no options) or a
+    :class:`~doxtr_roadmap.file_options.FileOptions` describing per-file
+    processing to apply **at parse time**, before rows are chained together:
+
+    - ``ignore_columns`` — every named column is blanked for that file's rows,
+      so downstream filtering, the link appendix, and rendering all see the
+      suppressed (empty) value.  Blanking ``row_group`` also drops the row
+      from same-row grouping; blanking ``tags`` makes ``:tags:`` / ``:query:``
+      see an empty tag set for those rows; blanking ``section`` flattens the
+      rows (they render without a section header and no longer parent
+      subtasks, since section-based subtask detection keys on that column).
+    - ``norender`` — the file's rows are parsed (so they remain available for
+      period-name resolution) but are **not** emitted into the diagram.
+
     Parameters
     ----------
     paths:
         Ordered iterable of :class:`pathlib.Path` or path strings.
+    options:
+        Optional parallel iterable of
+        :class:`~doxtr_roadmap.file_options.FileOptions` (or ``None`` entries),
+        one per path.  When shorter than *paths* the remaining files get no
+        options; when ``None`` no per-file processing is applied.
 
     Returns
     -------
     list
         Parsed sections list (see :func:`_parse_rows` for structure).
     """
+    paths = list(paths)
+    opts_list = list(options) if options is not None else []
+
     all_rows: list = []
-    for path in paths:
+    for idx, path in enumerate(paths):
+        opts = opts_list[idx] if idx < len(opts_list) else None
+        ignore_cols = getattr(opts, "ignore_columns", None) or frozenset()
+        # A norender file is parsed for period-lookup / documentation but must
+        # not contribute any rendered rows.  We simply skip chaining its rows.
+        if getattr(opts, "norender", False):
+            with open(path, newline="", encoding="utf-8") as fh:
+                # Still read it so a malformed file surfaces its error here,
+                # matching the behaviour of a rendered file.
+                list(csv.DictReader(fh))
+            continue
         with open(path, newline="", encoding="utf-8") as fh:
             reader = csv.DictReader(fh)
             # Materialise rows while the file is still open.
             # csv.DictReader is lazy; yielding from it after close() would
             # produce empty / corrupt data.
-            all_rows.extend(list(reader))
+            for row in reader:
+                if ignore_cols:
+                    row = _blank_columns(row, ignore_cols)
+                all_rows.append(row)
     return _parse_rows(iter(all_rows))
+
+
+def _blank_columns(row: dict, ignore_cols) -> dict:
+    """Return a shallow copy of *row* with each column in *ignore_cols* blanked.
+
+    Blanking (rather than deleting) keeps the key present so the downstream
+    ``row.get(col, "")`` calls in :func:`_parse_rows` behave identically to a
+    genuinely empty cell.
+
+    Parameters
+    ----------
+    row:
+        A single CSV row dict from :class:`csv.DictReader`.
+    ignore_cols:
+        Iterable of column names to blank.
+
+    Returns
+    -------
+    dict
+        A new dict; the original *row* is not mutated.
+    """
+    out = dict(row)
+    for col in ignore_cols:
+        out[col] = ""
+    return out
 
 
 def load_items_from_file(path) -> list:

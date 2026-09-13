@@ -10,7 +10,7 @@ __version__
     Package version string.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 import shlex
 import subprocess
@@ -23,7 +23,6 @@ logger = logging.getLogger(__name__)
 # Config defaults (canonical source of truth)
 # ---------------------------------------------------------------------------
 from .config_defaults import DEFAULT_CONFIG
-
 
 def _check_plantuml_loaded(app):
     """Verify sphinxcontrib.plantuml is in extensions; raise ExtensionError if not."""
@@ -170,10 +169,11 @@ def _init_per_build_warned(app):
 def setup(app):
     """Sphinx extension entry point.
 
-    Registers all ``doxtr_roadmap_*`` config values, the ``.. roadmap::``
-    directive, and ``builder-inited`` hooks that verify sphinxcontrib.plantuml
-    is loaded and that the installed PlantUML meets the minimum version
-    requirement.
+    Registers all ``doxtr_roadmap_*`` config values (including
+    ``doxtr_roadmap_diagram_background_color`` and
+    ``doxtr_roadmap_foreground_color``), the ``.. roadmap::`` directive, and
+    ``builder-inited`` hooks that verify sphinxcontrib.plantuml is loaded and
+    that the installed PlantUML meets the minimum version requirement.
 
     Parameters
     ----------
@@ -233,6 +233,24 @@ def setup(app):
     app.add_config_value("doxtr_roadmap_column_zoom",
                          cfg["column_zoom"], "env")
 
+    # Diagram-level background colour override. None → use the theme adapter's
+    # value (dark page colour in dark mode) or PlantUML's default (white).
+    app.add_config_value("doxtr_roadmap_diagram_background_color",
+                         cfg["diagram_background_color"], "env")
+
+    # Diagram-level foreground colour override (root FontColor + LineColor).
+    # None → use the theme adapter's value (readable light colour in dark mode)
+    # or PlantUML's default (black).
+    app.add_config_value("doxtr_roadmap_foreground_color",
+                         cfg["foreground_color"], "env")
+
+    # PlantUML output-format overrides (defer to sphinxcontrib.plantuml global
+    # settings when None).
+    app.add_config_value("doxtr_roadmap_html_format",
+                         cfg["html_format"], "env", types=(str, type(None)))
+    app.add_config_value("doxtr_roadmap_latex_format",
+                         cfg["latex_format"], "env", types=(str, type(None)))
+
     # Link-appendix config values
     app.add_config_value("doxtr_roadmap_link_appendix",
                          cfg["link_appendix"], "env", types=(bool, str))
@@ -247,7 +265,19 @@ def setup(app):
     app.add_config_value("doxtr_roadmap_figure_caption",
                          cfg["figure_caption"], "env")
 
-    # PlantUML version check config (15th config value)
+    # Dynamic period-expression config values
+    app.add_config_value("doxtr_roadmap_period_calendars",
+                         cfg["period_calendars"], "env", types=(dict,))
+    app.add_config_value("doxtr_roadmap_period_calendars_options",
+                         cfg["period_calendars_options"], "env", types=(dict,))
+    app.add_config_value("doxtr_roadmap_ignorable_columns",
+                         cfg["ignorable_columns"], "env", types=(list, tuple))
+    app.add_config_value("doxtr_roadmap_period_resolver_hooks",
+                         cfg["period_resolver_hooks"], "env", types=(list,))
+    app.add_config_value("doxtr_roadmap_business_days",
+                         cfg["business_days"], "env")
+
+    # PlantUML version check config value
     app.add_config_value(
         "doxtr_roadmap_require_plantuml_version",
         "error",  # default: fail the build if PlantUML is below v1.2026.7

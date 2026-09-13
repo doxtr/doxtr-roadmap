@@ -7,6 +7,8 @@ generation, and the sphinxcontrib.plantuml node construction.
 
 import csv
 import glob
+import hashlib
+import os
 import re
 import datetime
 from pathlib import Path
@@ -17,6 +19,8 @@ from docutils.statemachine import ViewList
 from sphinx.util import logging
 
 from . import csv_parser, generator
+from . import period_expr
+from .file_options import split_spec_and_options, parse_file_options, FileOptionError
 from .theme_adapter import get_effective_style
 from .link_resolver import LinkResolver
 from .tags import parse_tag_list, parse_row_tags, parse_nested_tags, row_matches_filter
@@ -24,6 +28,11 @@ from .config_defaults import _deep_merge
 from .safe_query import evaluate_query, QueryError
 
 logger = logging.getLogger(__name__)
+
+# Constants for the plantuml output-filename scheme used by sphinxcontrib.plantuml.
+# The filename is: plantuml-<sha1(incdir + _PLANTUML_HASH_SEP + uml)>.png
+_PLANTUML_FNAME_PREFIX = "plantuml-"
+_PLANTUML_HASH_SEP = b"\0"
 
 # Compiled pattern guard for the :query: match() helper — cache compiled
 # patterns per-call to avoid repeated re.compile on the same pattern.
@@ -49,6 +58,49 @@ def _query_match_helper(pattern: str, string: str) -> bool:
     if pattern not in _MATCH_PATTERN_CACHE:
         _MATCH_PATTERN_CACHE[pattern] = re.compile(pattern)
     return bool(_MATCH_PATTERN_CACHE[pattern].search(string))
+
+
+def _split_file_specs(file_opt: str) -> list:
+    """Split a raw ``:file:`` option value into individual spec tokens.
+
+    Splitting is on runs of whitespace and/or commas, **except** inside a
+    trailing ``[...]`` option bracket so that a comma-separated ``ignore=``
+    list is not treated as a spec separator.  Bracket depth is tracked so::
+
+        "a.csv[ignore=section,link] b.csv[norender], c.csv"
+
+    yields ``["a.csv[ignore=section,link]", "b.csv[norender]", "c.csv"]``.
+
+    Parameters
+    ----------
+    file_opt:
+        Raw ``:file:`` option string.
+
+    Returns
+    -------
+    list[str]
+        Non-empty spec tokens in source order.
+    """
+    specs: list = []
+    buf: list = []
+    depth = 0
+    for ch in file_opt.strip():
+        if ch == "[":
+            depth += 1
+            buf.append(ch)
+        elif ch == "]":
+            if depth > 0:
+                depth -= 1
+            buf.append(ch)
+        elif depth == 0 and (ch.isspace() or ch == ","):
+            if buf:
+                specs.append("".join(buf))
+                buf = []
+        else:
+            buf.append(ch)
+    if buf:
+        specs.append("".join(buf))
+    return [s for s in (t.strip() for t in specs) if s]
 
 
 def _clean_style_validator(argument):
@@ -122,6 +174,48 @@ def _float_validator(argument):
         raise ValueError(f"Expected a float value, got {argument!r}")
 
 
+def _html_format_validator(argument):
+    """Validator for the :html-format: directive option.
+
+    Accepts any of the HTML output formats understood by
+    sphinxcontrib.plantuml (``png``, ``svg``, ``svg_img``, ``svg_obj``,
+    ``none``).  The value is passed through verbatim as the ``html_format``
+    node attribute, which sphinxcontrib.plantuml honours in preference to the
+    global ``plantuml_output_format`` setting.
+    """
+    if argument is None or argument.strip() == "":
+        raise ValueError(":html-format: requires a value")
+    val = argument.strip()
+    valid = ("png", "svg", "svg_img", "svg_obj", "none")
+    if val not in valid:
+        raise ValueError(
+            f":html-format: value must be one of {', '.join(valid)} "
+            f"(got {argument!r})"
+        )
+    return val
+
+
+def _latex_format_validator(argument):
+    """Validator for the :latex-format: directive option.
+
+    Accepts any of the LaTeX output formats understood by
+    sphinxcontrib.plantuml (``eps``, ``pdf``, ``eps_pdf``, ``svg_pdf``,
+    ``png``, ``tikz``).  The value is passed through verbatim as the
+    ``latex_format`` node attribute, which sphinxcontrib.plantuml honours in
+    preference to the global ``plantuml_latex_output_format`` setting.
+    """
+    if argument is None or argument.strip() == "":
+        raise ValueError(":latex-format: requires a value")
+    val = argument.strip()
+    valid = ("eps", "pdf", "eps_pdf", "svg_pdf", "png", "tikz")
+    if val not in valid:
+        raise ValueError(
+            f":latex-format: value must be one of {', '.join(valid)} "
+            f"(got {argument!r})"
+        )
+    return val
+
+
 def _link_appendix_validator(argument):
     """Validator for the :link-appendix: directive option.
 
@@ -183,6 +277,31 @@ class RoadmapDirective(Directive):
                        pattern will **not** trigger an incremental rebuild
                        automatically; run ``make clean html`` after adding new
                        files to a glob pattern.
+
+                    Per-file options may be attached to any spec by appending a
+                    ``[...]`` bracket directly after the filename (or glob).
+                    Options are ``;``-separated; each is either a bare flag or
+                    a ``key=value`` pair whose value is a comma-separated list::
+
+                        :file: sprints/sprint-01.csv[ignore=section,link]
+                        :file: pi-calendar.csv[norender] work.csv
+
+                    Supported options:
+
+                    * ``ignore=<col>[,<col>...]`` — blank the named column(s)
+                      for that spec's rows at parse time, so the data can stay
+                      documented in the CSV while being suppressed from the
+                      diagram (and from ``:tags:`` / ``:query:`` filtering and
+                      the link appendix).  Only non-required columns may be
+                      ignored (see ``doxtr_roadmap_ignorable_columns``);
+                      ``name`` / ``start`` / ``end`` are rejected.
+                    * ``norender`` — load the file (so its rows remain usable
+                      for a named ``:period:`` / ``:start:`` / ``:end:`` and
+                      stay documented) but emit no bars from it.
+
+                    Options apply to every file a glob spec matches and are
+                    independent per spec, so a column can be ignored in one
+                    file but kept in another.
     :title:         Override the diagram title.
     :scale:         ``daily``, ``weekly``, or ``monthly``.
     :start:         Clip window start (ISO date YYYY-MM-DD).
@@ -246,6 +365,8 @@ class RoadmapDirective(Directive):
         "collision-char-width-factor": _float_validator,
         "column-zoom":                 _float_validator,
         "width":                       directives.length_or_percentage_or_unitless,
+        "html-format":                 _html_format_validator,
+        "latex-format":                _latex_format_validator,
         "link-appendix":               _link_appendix_validator,
         "link-appendix-title":         directives.unchanged,
         # Figure / List-of-Figures options (mirror sphinxcontrib.plantuml)
@@ -299,6 +420,13 @@ class RoadmapDirective(Directive):
         # :column-zoom: per-chart gantt column width multiplier
         if "column-zoom" in self.options:
             effective_config["column_zoom"] = self.options["column-zoom"]
+        # :html-format: / :latex-format: per-chart PlantUML output format
+        # overrides (fall back to the doxtr config value, then to the
+        # sphinxcontrib.plantuml global setting when neither is set).
+        if "html-format" in self.options:
+            effective_config["html_format"] = self.options["html-format"]
+        if "latex-format" in self.options:
+            effective_config["latex_format"] = self.options["latex-format"]
         # close-weekends flag just means True; handled in step 5
 
         # :link-appendix: / :link-appendix-title: per-chart overrides
@@ -308,9 +436,15 @@ class RoadmapDirective(Directive):
             effective_config["link_appendix_title"] = self.options["link-appendix-title"]
 
         # ---- 2. Load items ----
+        # *items* are the rows that will be rendered as bars.  *lookup_items*
+        # additionally include rows from norender files so that a named
+        # :period: / :start: / :end: can still resolve against a
+        # reference-only file that is not drawn.
         file_opt = self.options.get("file")
         if file_opt:
-            items = self._load_from_file_option(env, file_opt)
+            items, lookup_items = self._load_from_file_option(
+                env, file_opt, effective_config
+            )
         else:
             content_text = "\n".join(self.content)
             if not content_text.strip():
@@ -319,6 +453,7 @@ class RoadmapDirective(Directive):
                     "inline CSV body."
                 )
             items = csv_parser.load_items_from_string(content_text)
+            lookup_items = items
 
         # ---- 3. Apply tag filter ----
         tags_opt = self.options.get("tags")
@@ -427,34 +562,67 @@ class RoadmapDirective(Directive):
             )
 
         # ---- 5. Resolve clip window ----
+        # Build a resolution context so dynamic period expressions
+        # (current-pi, current-quarter, now()-63 businessdays, …) can be
+        # expanded before generator.resolve_window runs.  See period_expr.py.
+        expr_ctx = self._build_period_context(env, effective_config)
+
+        def _expr_warn(msg):
+            logger.warning(msg, location=(env.docname, self.lineno))
+
+        # :start: / :end: accept a literal ISO date OR any dynamic expression
+        # that resolves to a window; for a window we take its start edge for
+        # :start: and its end edge for :end:.
         start_date = None
         end_date = None
         if "start" in self.options:
-            try:
-                start_date = datetime.date.fromisoformat(self.options["start"])
-            except ValueError:
-                raise ValueError(
-                    f"Invalid start date: {self.options['start']!r}"
-                )
+            start_date = self._resolve_edge(
+                self.options["start"], expr_ctx, _expr_warn, edge="start"
+            )
         if "end" in self.options:
-            try:
-                end_date = datetime.date.fromisoformat(self.options["end"])
-            except ValueError:
-                raise ValueError(
-                    f"Invalid end date: {self.options['end']!r}"
-                )
+            end_date = self._resolve_edge(
+                self.options["end"], expr_ctx, _expr_warn, edge="end"
+            )
 
-        # OQ-2: comma-separated period names
+        # OQ-2: comma-separated period names.  Each token is routed through the
+        # dynamic resolver first; tokens that resolve to a window contribute
+        # explicit start/end dates (bypassing the CSV name lookup), while
+        # unresolved tokens fall through as plain CSV period names.
         period_names = []
+        expr_windows = []  # (start, end) windows from resolved dynamic tokens
         if "period" in self.options:
             raw_period = self.options["period"]
-            period_names = [p.strip() for p in raw_period.split(",") if p.strip()]
+            for tok in (p.strip() for p in raw_period.split(",")):
+                if not tok:
+                    continue
+                try:
+                    window = period_expr.resolve_period_token(
+                        tok, expr_ctx, warn=_expr_warn
+                    )
+                except period_expr.PeriodExprError as exc:
+                    raise ValueError(f"period {tok!r}: {exc}")
+                if window is not None:
+                    expr_windows.append(window)
+                else:
+                    period_names.append(tok)
+
+        # Merge any dynamic-expression windows into explicit start/end edges.
+        # The combined window spans the earliest start to the latest end of
+        # all resolved expressions, mirroring find_period_window semantics.
+        # Explicit :start: / :end: still take precedence over these.
+        if expr_windows:
+            expr_start = min(w[0] for w in expr_windows)
+            expr_end = max(w[1] for w in expr_windows)
+            if start_date is None:
+                start_date = expr_start
+            if end_date is None:
+                end_date = expr_end
 
         project_start, project_end = generator.resolve_window(
             period_names=period_names or None,
             start=start_date,
             end=end_date,
-            items=items,
+            items=lookup_items,
             config=effective_config,
         )
 
@@ -462,9 +630,17 @@ class RoadmapDirective(Directive):
         scale = self.options.get("scale") or effective_config.get("default_scale")
         close_weekends = "close-weekends" in self.options
 
-        if period_names and not close_weekends and "scale" not in self.options:
-            distinct = {p.lower() for p in period_names}
-            if len(distinct) == 1:
+        # A single dynamic-expression window with no CSV period names counts as
+        # a single distinct period for auto-scale purposes too.
+        single_expr_period = (
+            not period_names and len(expr_windows) == 1
+        )
+        if (period_names or single_expr_period) and not close_weekends \
+                and "scale" not in self.options:
+            is_single = single_expr_period or (
+                len({p.lower() for p in period_names}) == 1
+            )
+            if is_single:
                 scale = "daily"
                 if effective_config.get("close_weekends_on_single_period", True):
                     close_weekends = True
@@ -507,11 +683,67 @@ class RoadmapDirective(Directive):
         relfn = env.doc2path(env.docname, base=None)
         node["incdir"] = os.path.dirname(relfn)
         node["filename"] = os.path.split(relfn)[1]
+
+        # ---- 8a. Dark mode: mark our generated PNG as already-dark-themed ----
+        # In dark mode the theme adapter emitted dark-appropriate colours into
+        # puml_string (dark background, light labels, dark palette bars). The
+        # resulting PlantUML PNG is therefore already correct for the dark page
+        # and must NOT be re-processed by theme-core's dark image pipeline:
+        # a dark, largely-achromatic Gantt would be misclassified as grayscale
+        # line-art and remapped (black->text / white->page), inverting its
+        # colours to a light grey.
+        #
+        # We cannot use a filename glob (sphinxcontrib.plantuml writes ALL
+        # diagrams as plantuml-<hash>.png, including hand-authored ones that DO
+        # need recolouring). Instead we compute the exact output filename the
+        # same way sphinxcontrib.plantuml does -- sha1(incdir + '\0' + uml) --
+        # and register only that basename via theme-core's public API. This is
+        # a no-op when theme-core is absent, dark mode is off, or
+        # sphinx_app is None.
+        #
+        # hashlib is stdlib and cannot fail, so compute the hash unconditionally
+        # outside any try block. Only the theme-core import and API call are
+        # guarded: ImportError → theme-core absent (silent); other Exception
+        # → unexpected API break, logged at DEBUG so it is diagnosable.
+        _key = hashlib.sha1()
+        _key.update(node["incdir"].encode("utf-8"))
+        _key.update(_PLANTUML_HASH_SEP)
+        _key.update(node["uml"].encode("utf-8"))
+        _dark_png_name = f"{_PLANTUML_FNAME_PREFIX}{_key.hexdigest()}.png"
+        if sphinx_app is not None:
+            try:
+                from doxtr_pdf_theme_core import mark_image_dark_ready
+            except ImportError:
+                pass  # theme-core not installed — skip registration silently
+            else:
+                try:
+                    mark_image_dark_ready(sphinx_app, _dark_png_name)
+                except Exception:
+                    logger.debug(
+                        "[doxtr-roadmap] mark_image_dark_ready(%r) failed; "
+                        "dark PNG exclusion skipped",
+                        _dark_png_name,
+                        exc_info=True,
+                    )
         # :width: forces the rendered image to fill a specific width in HTML
         # and PDF (sphinxcontrib.plantuml maps this to style width / adjustbox).
         # Apply width to the INNER plantuml node before any figure wrapping.
         if "width" in self.options:
             node["width"] = self.options["width"]
+
+        # PlantUML output-format overrides.  sphinxcontrib.plantuml checks the
+        # node's 'html_format' / 'latex_format' attributes first and only falls
+        # back to the global plantuml_output_format / plantuml_latex_output_format
+        # when they are absent.  We therefore set them on the node ONLY when an
+        # override is configured (per-directive option or doxtr config value);
+        # leaving them unset preserves the project-wide PlantUML defaults so a
+        # 'normal' .. uml:: block and a roadmap can render in different formats.
+        html_fmt = effective_config.get("html_format")
+        if html_fmt:
+            node["html_format"] = html_fmt
+        latex_fmt = effective_config.get("latex_format")
+        if latex_fmt:
+            node["latex_format"] = latex_fmt
 
         # ---- 8b. Optionally wrap in a figure node ----
         # Mirror the sphinxcontrib.plantuml idiom exactly:
@@ -717,10 +949,150 @@ class RoadmapDirective(Directive):
         return [node] + appendix_nodes
 
     # ------------------------------------------------------------------
+    # Dynamic period-expression support
+    # ------------------------------------------------------------------
+
+    def _build_period_context(self, env, effective_config):
+        """Construct a :class:`period_expr.ResolutionContext` for this run.
+
+        Wires the directive into the resolver engine: supplies today's date,
+        the effective config (for calendars / hooks / business days), the
+        srcdir + document directory for file resolution, a dependency-note
+        callback (so calendar edits trigger rebuilds), and a calendar loader
+        that reuses the existing CSV parser.
+
+        Per-calendar options (``doxtr_roadmap_period_calendars_options``) using
+        the same grammar as the per-file ``:file:`` bracket are pre-resolved
+        here into an abspath -> :class:`FileOptions` map, so the injected
+        calendar loader can apply column-suppression consistently.  Since a
+        calendar never renders bars, the ``norender`` flag is meaningless for
+        calendars and is ignored.
+        """
+        docdir = str(Path(env.docname).parent)
+
+        def _note_dep(abspath):
+            try:
+                env.note_dependency(abspath)
+            except AttributeError:
+                pass
+
+        ctx = period_expr.ResolutionContext(
+            today=datetime.date.today(),
+            config=effective_config,
+            srcdir=str(env.srcdir),
+            docdir=docdir,
+            note_dependency=_note_dep,
+            load_calendar=None,  # set below once ctx exists (needs path resolver)
+        )
+
+        # Build an abspath -> FileOptions map from the per-calendar option
+        # strings.  Each entry in period_calendars_options is keyed by the same
+        # trigger keyword used in period_calendars; we resolve that calendar's
+        # file to an absolute path so the loader (which only sees a path) can
+        # look the options up.
+        calendars = effective_config.get("period_calendars") or {}
+        cal_options = effective_config.get("period_calendars_options") or {}
+        ignorable_columns = effective_config.get(
+            "ignorable_columns", list(csv_parser.DEFAULT_IGNORABLE_COLUMNS)
+        )
+        opts_by_path: dict = {}
+        for key, opt_str in cal_options.items():
+            spec = calendars.get(key)
+            # Case-insensitive keyword fallback, mirroring the resolver.
+            if spec is None:
+                for k, v in calendars.items():
+                    if k.lower() == key.lower():
+                        spec = v
+                        break
+            if spec is None:
+                raise ValueError(
+                    f"doxtr_roadmap_period_calendars_options key {key!r} does "
+                    f"not match any doxtr_roadmap_period_calendars entry"
+                )
+            spec_file = spec if isinstance(spec, str) else spec.get("file")
+            if not spec_file:
+                continue
+            try:
+                file_opts = parse_file_options(opt_str, ignorable_columns)
+            except FileOptionError as exc:
+                raise ValueError(
+                    f"doxtr_roadmap_period_calendars_options[{key!r}]: {exc}"
+                )
+            abspath = period_expr._resolve_calendar_file(spec_file, ctx)
+            opts_by_path[os.path.abspath(abspath)] = file_opts
+
+        def _load_calendar(abspath):
+            return self._load_calendar_rows(
+                abspath, opts_by_path.get(os.path.abspath(abspath))
+            )
+
+        ctx.load_calendar = _load_calendar
+        return ctx
+
+    @staticmethod
+    def _load_calendar_rows(abspath, options=None):
+        """Load a period-calendar CSV into ``(name, start, end, section)`` rows.
+
+        Reuses :func:`csv_parser.load_items_from_file` so a calendar file has
+        exactly the same format as a roadmap file (a dedicated calendar can
+        contain only the period rows, or an existing roadmap CSV can be reused
+        together with a ``section`` filter).  Rows whose ``start`` / ``end``
+        are not valid ISO dates are skipped.
+
+        *options*, when given, is a
+        :class:`~doxtr_roadmap.file_options.FileOptions` whose
+        ``ignore_columns`` are blanked at parse time (the ``norender`` flag is
+        ignored for calendars, which never render bars).
+        """
+        # Calendars are never rendered as bars, so norender is meaningless here
+        # and must not cause the rows to be skipped by the loader.  Strip it
+        # while preserving any ignore_columns.
+        if options is not None and getattr(options, "norender", False):
+            options = options._replace(norender=False)
+        sections = csv_parser.load_items_from_files([abspath], [options])
+        rows = []
+        for section_name, tasks in sections:
+            for task in tasks:
+                name = task.name if hasattr(task, "name") else task[0]
+                start_str = task.start if hasattr(task, "start") else task[1]
+                end_str = task.end if hasattr(task, "end") else task[2]
+                try:
+                    start_d = datetime.date.fromisoformat(start_str)
+                    end_d = datetime.date.fromisoformat(end_str)
+                except (ValueError, TypeError):
+                    continue
+                rows.append((name, start_d, end_d, section_name))
+        return rows
+
+    def _resolve_edge(self, raw_value, expr_ctx, warn, edge):
+        """Resolve a ``:start:`` / ``:end:`` option value to a single date.
+
+        A literal ISO date is returned verbatim.  A dynamic expression that
+        resolves to a window contributes its *start* edge when *edge* is
+        ``"start"`` and its *end* edge when *edge* is ``"end"``.  A value that
+        no resolver claims is a hard error (unlike :period:, an edge cannot
+        fall through to a CSV task name).
+        """
+        try:
+            window = period_expr.resolve_period_token(
+                raw_value, expr_ctx, warn=warn
+            )
+        except period_expr.PeriodExprError as exc:
+            raise ValueError(f"Invalid {edge} date {raw_value!r}: {exc}")
+        if window is None:
+            raise ValueError(
+                f"Invalid {edge} date: {raw_value!r} "
+                f"(expected an ISO date or a period expression such as "
+                f"'now()-63 days', 'current-quarter', or a configured "
+                f"calendar keyword)"
+            )
+        return window[0] if edge == "start" else window[1]
+
+    # ------------------------------------------------------------------
     # Multi-file / glob file loading
     # ------------------------------------------------------------------
 
-    def _load_from_file_option(self, env, file_opt: str) -> list:
+    def _load_from_file_option(self, env, file_opt: str, effective_config: dict) -> list:
         """Resolve, glob-expand, and load the ``:file:`` option value.
 
         *file_opt* is the raw option string — one or more CSV path specs
@@ -755,8 +1127,14 @@ class RoadmapDirective(Directive):
 
         Returns
         -------
-        list
-            Parsed sections list from :func:`csv_parser.load_items_from_files`.
+        tuple
+            ``(items, lookup_items)`` — both parsed sections lists from
+            :func:`csv_parser.load_items_from_files`.  *items* honours per-file
+            ``norender`` (reference-only files contribute no rendered bars);
+            *lookup_items* additionally includes those files' rows so a named
+            ``:period:`` / ``:start:`` / ``:end:`` can still resolve against a
+            reference-only file.  When no ``norender`` file is present the two
+            are the same list object.
 
         Raises
         ------
@@ -765,38 +1143,59 @@ class RoadmapDirective(Directive):
         """
         import glob as _glob
 
-        # Split on commas and whitespace.  This handles:
+        # Split on commas and whitespace, but NOT inside a trailing option
+        # bracket (so "a.csv[ignore=section,link] b.csv" splits into two
+        # specs, keeping the comma inside the bracket intact).  This handles:
         #   "a.csv b.csv"  → ["a.csv", "b.csv"]
         #   "a.csv, b.csv" → ["a.csv", "b.csv"]
         #   "sprints/*.csv" → ["sprints/*.csv"]
-        raw_specs = [s.strip() for s in re.split(r"[,\s]+", file_opt.strip()) if s.strip()]
+        #   "a.csv[ignore=x,y] b.csv[norender]"
+        #     → ["a.csv[ignore=x,y]", "b.csv[norender]"]
+        raw_specs = _split_file_specs(file_opt)
+
+        # Columns the user is allowed to suppress via a per-file ignore= option.
+        ignorable_columns = effective_config.get(
+            "ignorable_columns", list(csv_parser.DEFAULT_IGNORABLE_COLUMNS)
+        )
 
         doc_dir = Path(env.docname).parent
         base_doc = Path(env.srcdir) / doc_dir   # document-relative base
         base_src = Path(env.srcdir)             # srcdir-relative base
 
         resolved_paths: list = []  # ordered, deduped
+        resolved_options: list = []  # parallel to resolved_paths
         seen_paths: set = set()
 
         unmatched_specs: list = []
 
         for spec in raw_specs:
+            # Peel off the trailing [..] option bracket (if any) BEFORE globbing
+            # so glob metacharacters in the path still work and the options are
+            # not treated as part of the pattern.
+            filename, opts_str = split_spec_and_options(spec)
+            try:
+                file_opts = parse_file_options(opts_str, ignorable_columns)
+            except FileOptionError as exc:
+                raise ValueError(f":file: spec {spec!r}: {exc}")
+
             matches: list = []
 
             # Try document-relative base first, then srcdir base.
             for base in (base_doc, base_src):
-                raw_matches = sorted(_glob.glob(str(base / spec)))
+                raw_matches = sorted(_glob.glob(str(base / filename)))
                 if raw_matches:
                     for m in raw_matches:
                         p = Path(m).resolve()
                         if p not in seen_paths:
                             seen_paths.add(p)
                             resolved_paths.append(p)
+                            # Options attach to every file the glob matched.
+                            resolved_options.append(file_opts)
                     matches = raw_matches
                     break  # found at this base; do not try next
 
             if not matches:
-                unmatched_specs.append(spec)
+                unmatched_specs.append(filename)
 
         if not resolved_paths:
             specs_str = ", ".join(repr(s) for s in raw_specs)
@@ -820,7 +1219,28 @@ class RoadmapDirective(Directive):
         for p in resolved_paths:
             env.note_dependency(str(p))
 
-        return csv_parser.load_items_from_files(resolved_paths)
+        # Rendered items honour per-file norender (those files contribute no
+        # bars).  Lookup items additionally include norender files' rows so a
+        # named :period: can resolve against a reference-only file.
+        items = csv_parser.load_items_from_files(resolved_paths, resolved_options)
+
+        has_norender = any(
+            getattr(o, "norender", False) for o in resolved_options
+        )
+        if not has_norender:
+            lookup_items = items
+        else:
+            # Re-load with norender stripped so reference-only files' periods
+            # are available for name resolution (but never rendered).
+            lookup_options = [
+                (o._replace(norender=False) if o is not None else None)
+                for o in resolved_options
+            ]
+            lookup_items = csv_parser.load_items_from_files(
+                resolved_paths, lookup_options
+            )
+
+        return items, lookup_items
 
     # ------------------------------------------------------------------
     # Link-appendix helpers
