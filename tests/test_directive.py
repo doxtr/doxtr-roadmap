@@ -2706,3 +2706,375 @@ def test_directive_norender_period_still_resolves(tmp_path):
     assert "[Set27-01]" not in uml
     # The work file IS rendered.
     assert "[Task X]" in uml
+
+
+# ---------------------------------------------------------------------------
+# Period references in CSV start/end cells (@<period>)
+# ---------------------------------------------------------------------------
+
+@skip_no_plantuml
+def test_directive_period_ref_name_inline(tmp_path):
+    """A task row spanning @PI27-01 .. @PI27-08 resolves to those edges.
+
+    start=@PI27-01 -> PI27-01 start edge (2026-11-09)
+    end=@PI27-08   -> PI27-08 end edge   (2027-08-27)
+    """
+    rst = textwrap.dedent("""\
+        .. roadmap::
+           :start: 2026-11-09
+
+           section,name,start,end,row_group,link,tags
+           PI Rhythm,PI27-01,2026-11-09,2027-01-29,,,
+           PI Rhythm,PI27-08,2027-06-21,2027-08-27,,,
+           Work,Big Effort,@PI27-01,@PI27-08,,,
+    """)
+    app, warnings, src = _make_project(tmp_path, rst)
+    nodes = _get_plantuml_nodes(app)
+    assert len(nodes) == 1, f"Expected 1 plantuml node, warnings: {warnings}"
+    uml = nodes[0]["uml"]
+    assert "[Big Effort]" in uml
+    assert "starts 2026-11-09 and ends 2027-08-27" in uml
+
+
+@skip_no_plantuml
+def test_directive_period_ref_from_norender_file(tmp_path):
+    """@PI27-01 resolves against a norender reference calendar file."""
+    from sphinx.application import Sphinx
+
+    src = tmp_path / "src"
+    src.mkdir()
+    out = tmp_path / "_build" / "xml"
+    out.mkdir(parents=True)
+    doctrees = tmp_path / "_build" / ".doctrees"
+    doctrees.mkdir(parents=True)
+
+    (src / "periods.csv").write_text(textwrap.dedent("""\
+        section,name,start,end,row_group,link,tags
+        PI Rhythm,PI27-01,2026-11-09,2027-01-29,,,
+        PI Rhythm,PI27-08,2027-06-21,2027-08-27,,,
+    """), encoding="utf-8")
+    (src / "work.csv").write_text(textwrap.dedent("""\
+        section,name,start,end,row_group,link,tags
+        Work,Big Effort,@PI27-01,@PI27-08,,,
+    """), encoding="utf-8")
+    (src / "conf.py").write_text(textwrap.dedent("""\
+        project = 'Test'
+        extensions = ['sphinxcontrib.plantuml', 'doxtr_roadmap']
+        plantuml = 'plantuml'
+        plantuml_output_format = 'png'
+        master_doc = 'index'
+    """), encoding="utf-8")
+    (src / "index.rst").write_text(textwrap.dedent("""\
+        Test
+        ====
+
+        .. roadmap::
+           :file: periods.csv[norender] work.csv
+           :start: 2026-11-09
+    """), encoding="utf-8")
+    ws = io.StringIO()
+    app = Sphinx(str(src), str(src), str(out), str(doctrees), "xml",
+                 freshenv=True, warning=ws, verbosity=0)
+    app.build()
+    nodes = _get_plantuml_nodes(app)
+    assert len(nodes) == 1, f"warnings: {ws.getvalue()}"
+    uml = nodes[0]["uml"]
+    # The referenced period bars are not rendered ...
+    assert "[PI27-01]" not in uml
+    # ... but the work bar spans the two periods' edges.
+    assert "starts 2026-11-09 and ends 2027-08-27" in uml
+
+
+@skip_no_plantuml
+def test_directive_period_ref_calendar_keyword(tmp_path):
+    """@current-pi resolves via doxtr_roadmap_period_calendars."""
+    from sphinx.application import Sphinx
+
+    src = tmp_path / "src"
+    src.mkdir()
+    out = tmp_path / "_build" / "xml"
+    out.mkdir(parents=True)
+    doctrees = tmp_path / "_build" / ".doctrees"
+    doctrees.mkdir(parents=True)
+
+    (src / "pi-periods.csv").write_text(textwrap.dedent("""\
+        section,name,start,end,row_group,link,tags
+        PI Rhythm,PI26-11,2026-08-31,2026-11-06,,,
+        PI Rhythm,PI27-01,2026-11-09,2027-01-29,,,
+    """), encoding="utf-8")
+    (src / "conf.py").write_text(textwrap.dedent("""\
+        project = 'Test'
+        extensions = ['sphinxcontrib.plantuml', 'doxtr_roadmap']
+        plantuml = 'plantuml'
+        plantuml_output_format = 'png'
+        master_doc = 'index'
+        doxtr_roadmap_period_calendars = {
+            'current-pi': {
+                'file': 'pi-periods.csv',
+                'section': 'PI Rhythm',
+                'reference': '2026-12-15',
+            },
+        }
+    """), encoding="utf-8")
+    (src / "index.rst").write_text(textwrap.dedent("""\
+        Test
+        ====
+
+        .. roadmap::
+           :start: 2026-08-31
+
+           section,name,start,end,row_group,link,tags
+           Work,Current PI Work,@current-pi,@current-pi,,,
+    """), encoding="utf-8")
+    ws = io.StringIO()
+    app = Sphinx(str(src), str(src), str(out), str(doctrees), "xml",
+                 freshenv=True, warning=ws, verbosity=0)
+    app.build()
+    nodes = _get_plantuml_nodes(app)
+    assert len(nodes) == 1, f"warnings: {ws.getvalue()}"
+    uml = nodes[0]["uml"]
+    # reference 2026-12-15 falls inside PI27-01 (2026-11-09..2027-01-29).
+    assert "starts 2026-11-09 and ends 2027-01-29" in uml
+
+
+@skip_no_plantuml
+def test_directive_plain_iso_cells_unchanged(tmp_path):
+    """Regression: unprefixed ISO cells still render verbatim."""
+    rst = textwrap.dedent("""\
+        .. roadmap::
+           :start: 2026-12-01
+
+           section,name,start,end,row_group,link,tags
+           Work,Plain Task,2026-12-01,2027-01-15,,,
+    """)
+    app, warnings, src = _make_project(tmp_path, rst)
+    nodes = _get_plantuml_nodes(app)
+    assert len(nodes) == 1, f"warnings: {warnings}"
+    uml = nodes[0]["uml"]
+    assert "starts 2026-12-01 and ends 2027-01-15" in uml
+
+
+@skip_no_plantuml
+def test_directive_period_ref_unknown_errors(tmp_path):
+    """An unresolvable @reference produces a directive error node."""
+    rst = textwrap.dedent("""\
+        .. roadmap::
+           :start: 2026-12-01
+
+           section,name,start,end,row_group,link,tags
+           Work,Bad Task,@nope-not-here,2027-01-15,,,
+    """)
+    app, warnings, src = _make_project(tmp_path, rst)
+    errors = _get_error_nodes(app)
+    combined = warnings + " ".join(e.astext() for e in errors)
+    assert "unknown period reference" in combined, (
+        f"expected an 'unknown period reference' error; warnings: {warnings}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Period names / references resolved from configured calendar files
+# (without listing the calendar file in :file:)
+# ---------------------------------------------------------------------------
+
+def _make_calendar_project(tmp_path, index_rst, calendar_section="PI Rhythm"):
+    """Set up a project with a pi-periods.csv wired as a period calendar."""
+    from sphinx.application import Sphinx
+
+    src = tmp_path / "src"
+    src.mkdir()
+    out = tmp_path / "_build" / "xml"
+    out.mkdir(parents=True)
+    doctrees = tmp_path / "_build" / ".doctrees"
+    doctrees.mkdir(parents=True)
+
+    (src / "pi-periods.csv").write_text(textwrap.dedent("""\
+        section,name,start,end,row_group,link
+        PI Rhythm,PI27-01,2026-11-09,2027-01-29,pi,
+        PI Rhythm,PI27-08,2027-06-21,2027-08-27,pi,
+        PI Rhythm,PI28-01,2027-11-08,2028-01-28,pi,
+    """), encoding="utf-8")
+    (src / "work.csv").write_text(textwrap.dedent("""\
+        section,name,start,end,row_group,link,tags
+        Work,Task X,2026-12-01,2027-01-15,,,
+    """), encoding="utf-8")
+    (src / "conf.py").write_text(textwrap.dedent(f"""\
+        project = 'Test'
+        extensions = ['sphinxcontrib.plantuml', 'doxtr_roadmap']
+        plantuml = 'plantuml'
+        plantuml_output_format = 'png'
+        master_doc = 'index'
+        doxtr_roadmap_period_calendars = {{
+            'current-pi': {{
+                'file': 'pi-periods.csv',
+                'section': '{calendar_section}',
+                'reference': '2026-12-15',
+            }},
+        }}
+    """), encoding="utf-8")
+    (src / "index.rst").write_text("Test\n====\n\n" + index_rst + "\n",
+                                   encoding="utf-8")
+    ws = io.StringIO()
+    app = Sphinx(str(src), str(src), str(out), str(doctrees), "xml",
+                 freshenv=True, warning=ws, verbosity=0)
+    app.build()
+    return app, ws.getvalue(), src
+
+
+@skip_no_plantuml
+def test_directive_period_name_from_calendar_not_in_file(tmp_path):
+    """`:period: current-pi, PI28-01` works when only work.csv is listed.
+
+    PI28-01 lives only in the configured calendar (pi-periods.csv), not in
+    the loaded work.csv, yet must still resolve.  This is the regression the
+    fix targets.
+    """
+    rst = textwrap.dedent("""\
+        .. roadmap::
+           :file: work.csv
+           :period: current-pi, PI28-01
+    """)
+    app, warnings, src = _make_calendar_project(tmp_path, rst)
+    assert "unknown period" not in warnings, warnings
+    assert "doxtr-roadmap error" not in warnings, warnings
+    nodes = _get_plantuml_nodes(app)
+    assert len(nodes) == 1, f"warnings: {warnings}"
+    uml = nodes[0]["uml"]
+    # current-pi (ref 2026-12-15 -> PI27-01 start 2026-11-09) is the earliest
+    # start; PI28-01 end (2028-01-28) is the latest end.
+    assert "Project starts 2026-11-09" in uml
+
+
+@skip_no_plantuml
+def test_directive_period_ref_cell_from_calendar_not_in_file(tmp_path):
+    """`@PI28-01` in a start/end cell resolves via the calendar file only."""
+    rst = textwrap.dedent("""\
+        .. roadmap::
+           :start: 2026-11-09
+
+           section,name,start,end,row_group,link,tags
+           Work,Future Effort,@PI28-01,@PI28-01,,,
+    """)
+    # Note: inline body + configured calendar; no :file:, so the calendar is
+    # the sole source for the @PI28-01 name.
+    app, warnings, src = _make_calendar_project(tmp_path, rst)
+    assert "unknown period reference" not in warnings, warnings
+    nodes = _get_plantuml_nodes(app)
+    assert len(nodes) == 1, f"warnings: {warnings}"
+    uml = nodes[0]["uml"]
+    assert "starts 2027-11-08 and ends 2028-01-28" in uml
+
+
+@skip_no_plantuml
+def test_directive_loaded_row_wins_over_calendar(tmp_path):
+    """A loaded row's dates override a same-named calendar entry."""
+    rst = textwrap.dedent("""\
+        .. roadmap::
+           :period: PI27-01
+
+           section,name,start,end,row_group,link,tags
+           PI Rhythm,PI27-01,2026-11-01,2026-11-30,,,
+           Work,Task Z,2026-11-05,2026-11-20,,,
+    """)
+    # PI27-01 in the calendar is 2026-11-09..2027-01-29, but the inline row
+    # redefines it to Nov 2026; the loaded row must win.
+    app, warnings, src = _make_calendar_project(tmp_path, rst)
+    nodes = _get_plantuml_nodes(app)
+    assert len(nodes) == 1, f"warnings: {warnings}"
+    uml = nodes[0]["uml"]
+    assert "Project starts 2026-11-01" in uml
+
+
+@skip_no_plantuml
+def test_directive_period_ref_multi_row_combined_span(tmp_path):
+    """A name on several loaded rows spans their combined earliest/latest.
+
+    ``PI27-01`` appears twice with different windows; a ``@PI27-01`` cell must
+    resolve to the combined (min start, max end), mirroring
+    ``generator.find_period_window`` and the documented contract.
+    """
+    rst = textwrap.dedent("""\
+        .. roadmap::
+           :start: 2026-10-01
+
+           section,name,start,end,row_group,link,tags
+           PI Rhythm,PI27-01,2026-11-09,2027-01-29,,,
+           PI Rhythm,PI27-01,2026-10-01,2026-12-31,,,
+           Work,Spanning Effort,@PI27-01,@PI27-01,,,
+    """)
+    app, warnings, src = _make_project(tmp_path, rst)
+    nodes = _get_plantuml_nodes(app)
+    assert len(nodes) == 1, f"warnings: {warnings}"
+    uml = nodes[0]["uml"]
+    # Combined: earliest start 2026-10-01, latest end 2027-01-29.
+    assert "starts 2026-10-01 and ends 2027-01-29" in uml
+
+
+@skip_no_plantuml
+def test_directive_period_ref_case_insensitive(tmp_path):
+    """A lowercase ``@pi27-01`` cell resolves against the ``PI27-01`` row."""
+    rst = textwrap.dedent("""\
+        .. roadmap::
+           :start: 2026-11-09
+
+           section,name,start,end,row_group,link,tags
+           PI Rhythm,PI27-01,2026-11-09,2027-01-29,,,
+           Work,Lower Ref,@pi27-01,@pi27-01,,,
+    """)
+    app, warnings, src = _make_project(tmp_path, rst)
+    nodes = _get_plantuml_nodes(app)
+    assert len(nodes) == 1, f"warnings: {warnings}"
+    uml = nodes[0]["uml"]
+    assert "starts 2026-11-09 and ends 2027-01-29" in uml
+
+
+@skip_no_plantuml
+def test_directive_period_ref_bad_calendar_errors_gracefully(tmp_path):
+    """A ``@current-pi`` cell whose calendar file is missing errors cleanly.
+
+    The underlying ``PeriodExprError`` must be surfaced as a directive error
+    node (via the ValueError re-raise) rather than crashing the build.
+    """
+    from sphinx.application import Sphinx
+
+    src = tmp_path / "src"
+    src.mkdir()
+    out = tmp_path / "_build" / "xml"
+    out.mkdir(parents=True)
+    doctrees = tmp_path / "_build" / ".doctrees"
+    doctrees.mkdir(parents=True)
+
+    (src / "conf.py").write_text(textwrap.dedent("""\
+        project = 'Test'
+        extensions = ['sphinxcontrib.plantuml', 'doxtr_roadmap']
+        plantuml = 'plantuml'
+        plantuml_output_format = 'png'
+        master_doc = 'index'
+        doxtr_roadmap_period_calendars = {
+            'current-pi': {
+                'file': 'does-not-exist.csv',
+                'section': 'PI Rhythm',
+            },
+        }
+    """), encoding="utf-8")
+    (src / "index.rst").write_text(textwrap.dedent("""\
+        Test
+        ====
+
+        .. roadmap::
+           :start: 2026-11-09
+
+           section,name,start,end,row_group,link,tags
+           Work,Broken,@current-pi,@current-pi,,,
+    """), encoding="utf-8")
+    ws = io.StringIO()
+    app = Sphinx(str(src), str(src), str(out), str(doctrees), "xml",
+                 freshenv=True, warning=ws, verbosity=0)
+    # Build must not raise; a clean error node is produced instead.
+    app.build()
+    warnings = ws.getvalue()
+    errors = _get_error_nodes(app)
+    combined = warnings + " ".join(e.astext() for e in errors)
+    assert "period reference" in combined or "doxtr-roadmap error" in combined, (
+        f"expected a graceful directive error; warnings: {warnings}"
+    )

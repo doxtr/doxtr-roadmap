@@ -687,3 +687,113 @@ def resolve_period_token(
 
     # 5) Fall through — plain CSV name.
     return None
+
+
+# ---------------------------------------------------------------------------
+# Period references in CSV start/end cells
+# ---------------------------------------------------------------------------
+
+#: Sigil that marks a CSV ``start`` / ``end`` cell as a *period reference*
+#: rather than a literal ISO date.  A leading ``@`` is stripped and the
+#: remainder is resolved to a period window; the appropriate edge of that
+#: window is then substituted for the cell.  The sigil keeps the feature
+#: unambiguous and fully backward compatible: an unprefixed cell is still
+#: parsed strictly as an ISO date, exactly as before.
+PERIOD_REF_SIGIL = "@"
+
+
+def is_period_ref(cell: str) -> bool:
+    """Return ``True`` when *cell* is a period reference (starts with ``@``).
+
+    A period reference is any non-empty cell whose first non-space character
+    is :data:`PERIOD_REF_SIGIL`.  Only such cells are resolved by
+    :func:`resolve_cell_edge`; every other cell is left untouched so literal
+    ISO dates keep their exact historical behaviour.
+    """
+    if not cell:
+        return False
+    return cell.strip().startswith(PERIOD_REF_SIGIL)
+
+
+def resolve_cell_edge(
+    cell: str,
+    edge: str,
+    ctx: ResolutionContext,
+    name_lookup: Optional[Callable[[str], Optional[Window]]] = None,
+    warn: Optional[Callable[[str], None]] = None,
+) -> str:
+    """Resolve a period-reference *cell* to an ISO date string for one *edge*.
+
+    A *cell* of the form ``@<token>`` is expanded to a concrete ISO date:
+    the ``<token>`` is resolved to a ``(start, end)`` window and this function
+    returns the window's **start** edge when *edge* is ``"start"`` and its
+    **end** edge when *edge* is ``"end"``.  So a task row with
+    ``start=@PI27-01`` and ``end=@PI27-08`` spans from the start of PI27-01 to
+    the end of PI27-08.
+
+    Token resolution order
+    ----------------------
+    1. :func:`resolve_period_token` — handles a literal ISO date (``@2027-01-05``
+       is accepted, though pointless), user resolver hooks, configured
+       ``period_calendars`` keywords and built-in calendar math
+       (``@current-pi``, ``@now()+2 weeks``, …).
+    2. *name_lookup* — when the token is not claimed by any dynamic resolver
+       (``resolve_period_token`` returns ``None``), it is treated as a plain
+       **period name** and looked up via the *name_lookup* callback (typically
+       a case-insensitive match against the roadmap's own rows, e.g. the
+       ``PI Rhythm`` rows in ``pi-periods.csv``).
+
+    Parameters
+    ----------
+    cell:
+        Raw CSV cell value.  Must start with :data:`PERIOD_REF_SIGIL`;
+        callers should gate on :func:`is_period_ref` first.
+    edge:
+        ``"start"`` or ``"end"`` — which edge of the resolved window to return.
+    ctx:
+        :class:`ResolutionContext` used by :func:`resolve_period_token`.
+    name_lookup:
+        Optional ``(name) -> (start, end) | None`` callback used when the
+        token is a plain period name rather than a dynamic expression.
+    warn:
+        Optional non-fatal diagnostic callback forwarded to the resolvers.
+
+    Returns
+    -------
+    str
+        An ISO date string (``YYYY-MM-DD``).
+
+    Raises
+    ------
+    ValueError
+        If *edge* is not ``"start"``/``"end"``, or the token cannot be
+        resolved by either the dynamic resolvers or *name_lookup*.
+    """
+    if edge not in ("start", "end"):
+        raise ValueError(
+            f"resolve_cell_edge: edge must be 'start' or 'end', got {edge!r}"
+        )
+
+    token = cell.strip()
+    if token.startswith(PERIOD_REF_SIGIL):
+        token = token[len(PERIOD_REF_SIGIL):].strip()
+    if not token:
+        raise ValueError(
+            f"empty period reference {cell!r}: expected "
+            f"'{PERIOD_REF_SIGIL}<period-name-or-expression>'"
+        )
+
+    window = resolve_period_token(token, ctx, warn=warn)
+
+    if window is None and name_lookup is not None:
+        window = name_lookup(token)
+
+    if window is None:
+        raise ValueError(
+            f"unknown period reference {cell!r}: {token!r} did not match any "
+            f"ISO date, configured period calendar, calendar-math expression, "
+            f"or period name in the loaded roadmap rows"
+        )
+
+    chosen = window[0] if edge == "start" else window[1]
+    return chosen.isoformat()

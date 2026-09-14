@@ -25,14 +25,14 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Pull container image
-        run: docker pull doxtr/reactor:0.1.1
+        run: docker pull doxtr/reactor:0.1.2
 
       - name: Run test harness (HTML Sphinx build)
         run: |
           docker run --rm \
             -v ${{ github.workspace }}:/workspaces/docs \
             -w /workspaces/docs \
-            doxtr/reactor:0.1.1 \
+            doxtr/reactor:0.1.2 \
             bash -c '
               # Install doxtr-roadmap with dev extras; if doxtr-pdf-theme-core
               # is unavailable on PyPI the install continues without it — the
@@ -48,7 +48,7 @@ jobs:
           docker run --rm \
             -v ${{ github.workspace }}:/workspaces/docs \
             -w /workspaces/docs \
-            doxtr/reactor:0.1.1 \
+            doxtr/reactor:0.1.2 \
             bash -c '
               pip install -e /workspaces/docs[dev] 2>/dev/null || pip install -e /workspaces/docs &&
               pip install pytest sphinxcontrib-plantuml "doxtr-pdf-theme-core>=1.1.9" --upgrade &&

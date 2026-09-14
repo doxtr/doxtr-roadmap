@@ -125,8 +125,8 @@ required; every other column is optional and may be omitted entirely:
 |-------------|----------|-------------|
 | `section`   | no       | Section/group name, or a parent task name for subtasks. Blank or omitted → the task renders with no section header |
 | `name`      | yes      | Task display name |
-| `start`     | yes      | Start date (ISO `YYYY-MM-DD`) |
-| `end`       | yes      | End date (ISO `YYYY-MM-DD`). Same as `start` → milestone |
+| `start`     | yes      | Start date (ISO `YYYY-MM-DD`) or a [period reference](#period-references-in-startend-cells) (`@PI27-01`) |
+| `end`       | yes      | End date (ISO `YYYY-MM-DD`). Same as `start` → milestone. Also accepts a [period reference](#period-references-in-startend-cells) (`@PI27-08`) |
 | `row_group` | no       | Tasks sharing this non-empty value render on one Gantt row |
 | `link`      | no       | Plain URL or `:xlink:\`id\`` role expression |
 | `tags`      | no       | Comma-separated tag list |
@@ -141,6 +141,43 @@ subtask, inserted directly beneath the parent task in the same section.
 When `start == end`, the row is rendered as a Gantt milestone (diamond marker).
 Milestones are never clamped to the clip window.
 
+### Period references in start/end cells
+
+Instead of a literal ISO date, a `start` or `end` cell may hold a **period
+reference** of the form `@<period>`. The reference is expanded to a concrete
+date before rendering: the referenced period's **start** edge is used in a
+`start` cell and its **end** edge in an `end` cell. This lets a task be pinned
+to named periods without copying their dates by hand.
+
+```
+section,name,start,end,row_group,link,tags
+PI Rhythm,PI27-01,2026-11-09,2027-01-29,,,
+PI Rhythm,PI27-08,2027-06-21,2027-08-27,,,
+Work,Big Effort,@PI27-01,@PI27-08,,,
+```
+
+Here `Big Effort` spans from the **start of PI27-01** (`2026-11-09`) to the
+**end of PI27-08** (`2027-08-27`).
+
+`<period>` is resolved, in order, as:
+
+1. Any [dynamic expression](#dynamic-period-expressions) — a literal ISO date
+   (`@2027-01-05`), a configured `doxtr_roadmap_period_calendars` keyword
+   (`@current-pi`), or built-in calendar math (`@now()+2 weeks`,
+   `@current-quarter`).
+2. A plain **period name** matched case-insensitively against the names of the
+   loaded roadmap rows (including rows from a file loaded with the `norender`
+   flag) **and** the rows of every configured `doxtr_roadmap_period_calendars`
+   file. So a dedicated `pi-periods.csv` wired as a calendar can define the
+   periods that other rows reference, even when it is not listed in `:file:`.
+   A loaded row wins over a calendar row on a name clash; when a name occurs
+   on several rows the reference spans their combined earliest-start /
+   latest-end.
+
+Only cells that begin with `@` are treated as references; every other cell is
+still parsed strictly as an ISO date, so existing CSVs are unaffected. An
+unresolvable reference raises a clear build error.
+
 ## Directive Options
 
 | Option           | Type              | Description |
@@ -150,7 +187,7 @@ Milestones are never clamped to the clip window.
 | `:scale:`        | choice            | `daily`, `weekly`, `monthly` |
 | `:start:`        | ISO date / expr   | Clip window start. Accepts an ISO date or a [dynamic expression](#dynamic-period-expressions) (`now()-63 businessdays`, `current-quarter`, a calendar keyword) resolved to its start edge |
 | `:end:`          | ISO date / expr   | Clip window end. Accepts an ISO date or a [dynamic expression](#dynamic-period-expressions) resolved to its end edge |
-| `:period:`       | string            | Comma-separated period name(s) to zoom to. Each token may be a CSV period name or a [dynamic expression](#dynamic-period-expressions) (`current-pi`, `current-quarter`, `now()-2 weeks`) |
+| `:period:`       | string            | Comma-separated period name(s) to zoom to. Each token may be a CSV period name (matched against the loaded rows **or** any configured `doxtr_roadmap_period_calendars` file) or a [dynamic expression](#dynamic-period-expressions) (`current-pi`, `current-quarter`, `now()-2 weeks`) |
 | `:close-weekends:` | flag            | Force weekend closure |
 | `:clean-style:`    | true/false      | Override `clean_style` for this directive; bare flag or `true` enables, `false` disables (see [clean_style](#clean_style-and-the-hide-column-directives)) |
 | `:tags:`         | string            | Tag filter (nested `[ ]` / `!` / `!!` syntax) |

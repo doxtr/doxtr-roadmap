@@ -70,7 +70,10 @@ DEFAULT_CONFIG = {
     "closed": {"background_color": None},
 
     # ----- Theme-core integration -------------------------------------
-    # "auto"  → active iff "doxtr_pdf_theme_core" is in config.extensions
+    # "auto"  → active iff doxtr_pdf_theme_core is loaded for this build
+    #            (either listed in config.extensions OR pulled in transitively
+    #            by another extension via app.setup_extension(); detected via
+    #            theme_adapter._theme_core_loaded).
     # True    → always active (warns if core absent)
     # False   → never active
     "use_theme_core": "auto",

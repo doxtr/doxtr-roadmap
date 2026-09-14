@@ -21,6 +21,63 @@ logger = logging.getLogger(__name__)
 _DARK_LABEL_INVERT_SEED = "#000000"
 
 
+# Config attribute that doxtr_pdf_theme_core resolves in its ``config-inited``
+# hook. Its presence on the Sphinx config object is an unambiguous signal that
+# theme-core's ``setup()`` ran *and* fully initialised — even when theme-core
+# was pulled in transitively (e.g. as a dependency of another extension that
+# called ``app.setup_extension('doxtr_pdf_theme_core')``) and therefore never
+# appears in the user's literal ``conf.py`` ``extensions`` list.
+#
+# This attribute is deliberately internal to theme-core (a *resolved* value,
+# not a user-facing knob), so a project could not plausibly set it by hand
+# without theme-core — unlike ``doxtr_semantic_palette``, which a user might
+# conceivably define independently.
+_THEME_CORE_MARKER_ATTR = "doxtr_dark_mode_strategy_resolved"
+
+
+def _theme_core_loaded(config) -> bool:
+    """Return True when doxtr_pdf_theme_core is active for this build.
+
+    Detection is deliberately broader than a simple ``"doxtr_pdf_theme_core"
+    in config.extensions`` check, because Sphinx only lists *user-declared*
+    extensions in ``config.extensions``. When another extension loads
+    theme-core transitively via ``app.setup_extension('doxtr_pdf_theme_core')``,
+    theme-core is fully initialised (its ``setup()`` and ``config-inited`` hook
+    run, dark mode resolves) yet it never appears in ``config.extensions``.
+    Previously that made roadmap's ``"auto"`` detection miss theme-core, so
+    dark-mode colours were never applied and users had to add theme-core to
+    ``extensions`` (or set ``doxtr_roadmap_use_theme_core=True``) by hand in
+    ``conf.py`` to get correct dark renders. This helper removes that manual
+    workaround.
+
+    Signals checked (any one is sufficient):
+
+    1. ``"doxtr_pdf_theme_core"`` is in ``config.extensions`` (explicit load).
+    2. :data:`_THEME_CORE_MARKER_ATTR` is present and set on ``config`` — proof
+       that theme-core's ``config-inited`` hook ran (transitive or explicit
+       load).
+
+    Parameters
+    ----------
+    config:
+        Sphinx config object.
+
+    Returns
+    -------
+    bool
+        True if theme-core is loaded and initialised for this build.
+    """
+    extensions = getattr(config, "extensions", None) or []
+    if "doxtr_pdf_theme_core" in extensions:
+        return True
+    # Transitive load: theme-core's config-inited hook set this resolved value
+    # even though it is absent from the user's conf.py extensions list. A
+    # MagicMock returns a truthy attribute for *any* name, so guard against
+    # that in tests by requiring a real, non-callable string value.
+    val = getattr(config, _THEME_CORE_MARKER_ATTR, None)
+    return isinstance(val, str) and bool(val)
+
+
 def _dict_diff(default: dict, actual: dict) -> dict:
     """Return the sub-tree of *actual* that differs from *default*.
 
@@ -279,17 +336,13 @@ def get_effective_style(config) -> dict:
         elif raw_use_theme_core.lower() in ("false", "0"):
             use_theme_core = False
         else:  # "auto"
-            use_theme_core = "doxtr_pdf_theme_core" in (
-                getattr(config, "extensions", None) or []
-            )
+            use_theme_core = _theme_core_loaded(config)
     else:
         use_theme_core = bool(raw_use_theme_core)
 
     if use_theme_core:
         # Check core is actually loaded
-        core_present = "doxtr_pdf_theme_core" in (
-            getattr(config, "extensions", None) or []
-        )
+        core_present = _theme_core_loaded(config)
         if not core_present:
             logger.warning(
                 "doxtr-roadmap: doxtr_roadmap_use_theme_core=True but "

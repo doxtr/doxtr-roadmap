@@ -7,8 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Per-file column suppression and reference-only files
 
+### Fixed
+
+- **Dark-mode rendering when theme-core is loaded transitively** — the
+  `"auto"` value of `doxtr_roadmap_use_theme_core` now detects
+  `doxtr_pdf_theme_core` even when it is *not* listed in `conf.py`'s
+  `extensions` but is pulled in transitively by another extension via
+  `app.setup_extension('doxtr_pdf_theme_core')`. Previously the detection
+  only checked `config.extensions`, which lists user-declared extensions
+  only, so a transitively-loaded core was missed: the theme palette (and, in
+  particular, the dark-mode diagram background / foreground colours) was
+  never applied and dark PDFs rendered the Gantt with light colours. Users
+  had to add theme-core to `extensions` (or force
+  `doxtr_roadmap_use_theme_core=True`) by hand in `conf.py` to work around
+  it. Detection now also treats the presence of theme-core's resolved
+  `doxtr_dark_mode_strategy_resolved` config value (set by theme-core's
+  `config-inited` hook) as proof that the core is loaded and initialised, so
+  no `conf.py` workaround is needed. Explicit `True` / `False` settings are
+  unchanged.
+
 ### Added
 
+- **Period references in `start` / `end` cells** — a task row's `start` or
+  `end` cell may be written as `@<period>` instead of a literal ISO date. The
+  reference is expanded before rendering to the referenced period's **start**
+  edge (in a `start` cell) or **end** edge (in an `end` cell), so a row with
+  `start=@PI27-01` and `end=@PI27-08` spans from the start of PI27-01 to the
+  end of PI27-08. `<period>` may be a dynamic expression (a literal ISO date,
+  a `doxtr_roadmap_period_calendars` keyword such as `@current-pi`, or
+  calendar math such as `@now()+2 weeks`) or a plain period **name** matched
+  case-insensitively against the loaded roadmap rows (including rows from a
+  `norender` reference file). Cells without a leading `@` are still parsed
+  strictly as ISO dates, so existing CSVs are unaffected; an unresolvable
+  reference raises a clear build error. New public helpers
+  `period_expr.is_period_ref` and `period_expr.resolve_cell_edge`.
+- **Configured calendar files resolve plain period names** — a bare `:period:`
+  name (e.g. `:period: current-pi, PI28-01`) and a `@<name>` cell reference
+  now resolve against the rows of every configured
+  `doxtr_roadmap_period_calendars` file, not just the rows loaded via
+  `:file:`. Previously a name that lived only in `pi-periods.csv` failed with
+  `unknown period name(s)` unless that file was also listed in `:file:`
+  (typically with `norender`). A loaded row still wins over a calendar row on
+  a name clash.
 - **Per-file `:file:` options** — each `:file:` spec may carry a trailing
   `[...]` option bracket (e.g. `sprint-01.csv[ignore=section,link;norender]`).
   Options are `;`-separated; each is a bare flag or a `key=value` pair whose

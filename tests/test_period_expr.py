@@ -536,3 +536,84 @@ def test_match_invalid_value():
             "current-pi",
             ctx(config=cfg, load_calendar=_pi_calendar_loader),
         )
+
+
+# ---------------------------------------------------------------------------
+# Period references in CSV start/end cells (resolve_cell_edge / is_period_ref)
+# ---------------------------------------------------------------------------
+
+from doxtr_roadmap.period_expr import is_period_ref, resolve_cell_edge
+
+
+def test_is_period_ref():
+    assert is_period_ref("@PI27-01")
+    assert is_period_ref("  @PI27-01  ")
+    assert is_period_ref("@current-pi")
+    assert not is_period_ref("2027-01-05")
+    assert not is_period_ref("PI27-01")
+    assert not is_period_ref("")
+    assert not is_period_ref(None)
+
+
+def test_resolve_cell_edge_literal_iso():
+    # A literal ISO date behind the sigil resolves to itself for both edges.
+    assert resolve_cell_edge("@2027-01-05", "start", ctx()) == "2027-01-05"
+    assert resolve_cell_edge("@2027-01-05", "end", ctx()) == "2027-01-05"
+
+
+def test_resolve_cell_edge_name_lookup_edges():
+    # A plain period name is resolved via the injected name_lookup, and the
+    # correct edge is selected per the `edge` argument.
+    window = (datetime.date(2026, 11, 9), datetime.date(2027, 1, 29))
+
+    def _lookup(name):
+        return window if name.strip().lower() == "pi27-01" else None
+
+    assert resolve_cell_edge(
+        "@PI27-01", "start", ctx(), name_lookup=_lookup
+    ) == "2026-11-09"
+    assert resolve_cell_edge(
+        "@PI27-01", "end", ctx(), name_lookup=_lookup
+    ) == "2027-01-29"
+
+
+def test_resolve_cell_edge_calendar_keyword():
+    # @current-pi resolves through the configured period_calendars.
+    cfg = {"period_calendars": {"current-pi": {"file": "pi.csv"}}}
+    c = ctx(config=cfg, load_calendar=_pi_calendar_loader)
+    # TODAY (2026-12-15) falls inside PI27-01 (2026-11-09..2027-01-29).
+    assert resolve_cell_edge("@current-pi", "start", c) == "2026-11-09"
+    assert resolve_cell_edge("@current-pi", "end", c) == "2027-01-29"
+
+
+def test_resolve_cell_edge_unknown_raises():
+    with pytest.raises(ValueError, match="unknown period reference"):
+        resolve_cell_edge("@does-not-exist", "start", ctx())
+
+
+def test_resolve_cell_edge_empty_ref_raises():
+    with pytest.raises(ValueError, match="empty period reference"):
+        resolve_cell_edge("@", "start", ctx())
+
+
+def test_resolve_cell_edge_bad_edge_raises():
+    with pytest.raises(ValueError, match="edge must be"):
+        resolve_cell_edge("@2027-01-05", "middle", ctx())
+
+
+def test_resolve_cell_edge_calendar_math():
+    # current-quarter for TODAY (2026-12-15) -> Q4 2026.
+    assert resolve_cell_edge("@current-quarter", "start", ctx()) == "2026-10-01"
+    assert resolve_cell_edge("@current-quarter", "end", ctx()) == "2026-12-31"
+
+
+def test_resolve_cell_edge_relative_math():
+    # now()+2 weeks from 2026-12-15 -> 2026-12-29 (zero-width window: both
+    # edges are the same date).
+    assert resolve_cell_edge("@now()+2 weeks", "start", ctx()) == "2026-12-29"
+    assert resolve_cell_edge("@now()+2 weeks", "end", ctx()) == "2026-12-29"
+
+
+def test_resolve_cell_edge_space_after_sigil():
+    # A space between the sigil and the token is tolerated (both are stripped).
+    assert resolve_cell_edge("@ 2027-01-05", "start", ctx()) == "2027-01-05"

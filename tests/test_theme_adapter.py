@@ -2,7 +2,7 @@
 
 import pytest
 from unittest.mock import MagicMock
-from doxtr_roadmap.theme_adapter import get_effective_style
+from doxtr_roadmap.theme_adapter import get_effective_style, _theme_core_loaded
 from doxtr_roadmap.config_defaults import DEFAULT_CONFIG
 
 
@@ -295,3 +295,123 @@ def test_effective_style_figure_caption_none_when_not_set():
     cfg = _make_config()
     style = get_effective_style(cfg)
     assert style["figure_caption"] is None
+
+
+# ---------------------------------------------------------------------------
+# Transitive theme-core detection
+# ---------------------------------------------------------------------------
+# When another extension pulls in doxtr_pdf_theme_core via
+# app.setup_extension(...), theme-core is fully initialised (its config-inited
+# hook sets doxtr_dark_mode_strategy_resolved) but it is NOT listed in
+# config.extensions. The adapter must still detect it under "auto" so users no
+# longer need to add theme-core to extensions (or force use_theme_core=True) by
+# hand in conf.py to get correct (dark-mode) renders.
+
+
+class _PlainConfig:
+    """Minimal stand-in for a Sphinx config object.
+
+    Unlike MagicMock, missing attributes raise AttributeError, so getattr with
+    a default behaves exactly like a real Sphinx config for the marker check.
+    """
+
+    def __init__(self, **attrs):
+        self.extensions = attrs.pop("extensions", [])
+        for k, v in attrs.items():
+            setattr(self, k, v)
+
+
+def test_theme_core_loaded_explicit_extension():
+    cfg = _PlainConfig(extensions=["doxtr_pdf_theme_core"])
+    assert _theme_core_loaded(cfg) is True
+
+
+def test_theme_core_loaded_transitive_marker():
+    """Not in extensions, but theme-core's resolved marker is set."""
+    cfg = _PlainConfig(
+        extensions=["some_other_ext"],
+        doxtr_dark_mode_strategy_resolved="invert",
+    )
+    assert _theme_core_loaded(cfg) is True
+
+
+def test_theme_core_not_loaded_when_absent():
+    cfg = _PlainConfig(extensions=["some_other_ext"])
+    assert _theme_core_loaded(cfg) is False
+
+
+def test_theme_core_marker_ignored_when_not_string():
+    """A non-string marker value (e.g. an unset MagicMock attr) is ignored."""
+    cfg = _PlainConfig(
+        extensions=[],
+        doxtr_dark_mode_strategy_resolved=object(),
+    )
+    assert _theme_core_loaded(cfg) is False
+
+
+def test_theme_core_marker_ignored_when_empty_string():
+    cfg = _PlainConfig(
+        extensions=[],
+        doxtr_dark_mode_strategy_resolved="",
+    )
+    assert _theme_core_loaded(cfg) is False
+
+
+def test_auto_active_via_transitive_marker(monkeypatch):
+    """auto + core loaded transitively (marker set, not in extensions) →
+    theme-core palette is applied without any conf.py workaround."""
+    # Light mode: force get_dark_mode_context inactive so the light
+    # doxtr_semantic_palette path is exercised deterministically.
+    monkeypatch.setattr(
+        "doxtr_pdf_theme_core.get_dark_mode_context",
+        lambda c: {"active": False, "palette": None, "page_color": None,
+                   "text_color": None, "invert_color": lambda x: x},
+        raising=False,
+    )
+    cfg = _make_config(
+        doxtr_roadmap_use_theme_core="auto",
+        doxtr_semantic_palette={"primary": "#0055AA"},
+        doxtr_globals={"light": {}},
+        extensions=[],  # theme-core NOT declared by the user
+    )
+    # Simulate theme-core's config-inited hook having run.
+    cfg.doxtr_dark_mode_strategy_resolved = "invert"
+    style = get_effective_style(cfg)
+    assert style["bar"]["done_color"] == "#0055AA"
+
+
+def test_auto_inactive_without_marker_or_extension():
+    """auto + no extension entry + no resolved marker → defaults (unchanged)."""
+    cfg = _make_config(
+        doxtr_roadmap_use_theme_core="auto",
+        doxtr_semantic_palette={"primary": "#0055AA"},
+        doxtr_globals={"light": {}},
+        extensions=[],
+    )
+    # No doxtr_dark_mode_strategy_resolved marker → MagicMock returns a Mock,
+    # which _theme_core_loaded must reject (not a str).
+    style = get_effective_style(cfg)
+    assert style["bar"]["done_color"] == DEFAULT_CONFIG["bar"]["done_color"]
+
+
+def test_use_true_no_warning_with_transitive_marker(caplog, monkeypatch):
+    """use_theme_core=True + transitive load (marker set) → no 'core absent'
+    warning, palette applied."""
+    import logging
+    monkeypatch.setattr(
+        "doxtr_pdf_theme_core.get_dark_mode_context",
+        lambda c: {"active": False, "palette": None, "page_color": None,
+                   "text_color": None, "invert_color": lambda x: x},
+        raising=False,
+    )
+    cfg = _make_config(
+        doxtr_roadmap_use_theme_core=True,
+        doxtr_semantic_palette={"primary": "#0055AA"},
+        doxtr_globals={"light": {}},
+        extensions=[],  # not declared, but loaded transitively
+    )
+    cfg.doxtr_dark_mode_strategy_resolved = "invert"
+    with caplog.at_level(logging.WARNING):
+        style = get_effective_style(cfg)
+    assert not any("use_theme_core" in r.message for r in caplog.records)
+    assert style["bar"]["done_color"] == "#0055AA"

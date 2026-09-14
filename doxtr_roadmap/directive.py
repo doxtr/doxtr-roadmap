@@ -304,9 +304,18 @@ class RoadmapDirective(Directive):
                     file but kept in another.
     :title:         Override the diagram title.
     :scale:         ``daily``, ``weekly``, or ``monthly``.
-    :start:         Clip window start (ISO date YYYY-MM-DD).
-    :end:           Clip window end (ISO date YYYY-MM-DD).
-    :period:        Comma-separated period name(s) to zoom to.
+    :start:         Clip window start.  Accepts an ISO date (``YYYY-MM-DD``) or
+                    a dynamic period expression (a configured
+                    ``doxtr_roadmap_period_calendars`` keyword such as
+                    ``current-pi``, or calendar math such as
+                    ``now()-63 businessdays``) resolved to its start edge.
+    :end:           Clip window end.  Accepts an ISO date (``YYYY-MM-DD``) or a
+                    dynamic period expression resolved to its end edge.
+    :period:        Comma-separated period name(s) to zoom to.  Each token may
+                    be a period name (matched against the loaded rows or any
+                    configured ``doxtr_roadmap_period_calendars`` file) or a
+                    dynamic period expression (``current-pi``,
+                    ``current-quarter``, ``now()-2 weeks``).
     :close-weekends: Flag — force weekend closure regardless of auto-scale.
     :tags:          Tag filter expression (xlink nested syntax).
     :query:         Python safe-eval filter expression.  The expression is
@@ -342,6 +351,22 @@ class RoadmapDirective(Directive):
 
                         :query: "eng" in tags and end > start
                         :query: match(r"^Set\\d", name)
+
+    **Period references in start/end cells.**  Instead of a literal ISO date,
+    a ``start`` or ``end`` cell may be written as a *period reference*
+    ``@<period>``.  The reference is expanded in place to a concrete date: the
+    referenced period's **start** edge in a ``start`` cell and its **end**
+    edge in an ``end`` cell.  So a row with ``start=@PI27-01`` and
+    ``end=@PI27-08`` spans from the start of PI27-01 to the end of PI27-08.
+
+    ``<period>`` is resolved as a plain period **name** matched
+    case-insensitively against the loaded roadmap rows (e.g. a ``PI27-01`` row
+    in a ``pi-periods.csv``, including one loaded with the ``norender`` flag)
+    and every configured ``doxtr_roadmap_period_calendars`` file, or as a
+    dynamic expression (a configured calendar keyword, calendar math such as
+    ``@current-pi`` / ``@now()+2 weeks``, or even a literal ISO date).  Cells
+    without a leading ``@`` are still parsed strictly as ISO dates, so existing
+    CSVs are unaffected.
     """
 
     has_content = True
@@ -455,6 +480,40 @@ class RoadmapDirective(Directive):
             items = csv_parser.load_items_from_string(content_text)
             lookup_items = items
 
+        # ---- 2b. Resolve period references in start/end cells ----
+        # A start/end cell written as ``@<period-name-or-expression>`` (e.g.
+        # ``@PI27-01``) is expanded in place to a concrete ISO date: the
+        # referenced period's start edge for a start cell, its end edge for an
+        # end cell.  This runs before every downstream consumer
+        # (tag/query filters, find_period_window, the generator) so they all
+        # continue to see valid ISO-date strings.  Plain (unprefixed) cells are
+        # left untouched, preserving strict ISO-date behaviour.
+        #
+        # Built once here and reused for the clip-window resolution in step 5.
+        expr_ctx = self._build_period_context(env, effective_config)
+
+        def _expr_warn(msg):
+            logger.warning(msg, location=(env.docname, self.lineno))
+
+        # Combined case-insensitive period-name index: loaded rows plus every
+        # configured period-calendar file.  Used both to expand ``@`` cell
+        # references and to resolve plain :period: names that live only in a
+        # calendar file (e.g. PI28-01 in pi-periods.csv).
+        period_name_index = self._build_period_name_index(
+            lookup_items, expr_ctx, _expr_warn
+        )
+
+        try:
+            items, lookup_items = self._resolve_period_cells(
+                items, lookup_items, expr_ctx, _expr_warn, period_name_index
+            )
+        except period_expr.PeriodExprError as exc:
+            # A calendar-backed ``@`` cell whose calendar fails to resolve
+            # raises PeriodExprError; re-raise as ValueError so run() renders a
+            # clean directive error node instead of crashing the build (mirrors
+            # the :period: / :start: / :end: handling below).
+            raise ValueError(f"period reference: {exc}")
+
         # ---- 3. Apply tag filter ----
         tags_opt = self.options.get("tags")
         if tags_opt:
@@ -562,13 +621,10 @@ class RoadmapDirective(Directive):
             )
 
         # ---- 5. Resolve clip window ----
-        # Build a resolution context so dynamic period expressions
-        # (current-pi, current-quarter, now()-63 businessdays, …) can be
-        # expanded before generator.resolve_window runs.  See period_expr.py.
-        expr_ctx = self._build_period_context(env, effective_config)
-
-        def _expr_warn(msg):
-            logger.warning(msg, location=(env.docname, self.lineno))
+        # The dynamic period-expression context (expr_ctx) and the _expr_warn
+        # callback were built in step 2b and are reused here so that the
+        # :start: / :end: / :period: options expand consistently with the
+        # period references resolved inside the CSV cells.  See period_expr.py.
 
         # :start: / :end: accept a literal ISO date OR any dynamic expression
         # that resolves to a window; for a window we take its start edge for
@@ -586,8 +642,13 @@ class RoadmapDirective(Directive):
 
         # OQ-2: comma-separated period names.  Each token is routed through the
         # dynamic resolver first; tokens that resolve to a window contribute
-        # explicit start/end dates (bypassing the CSV name lookup), while
-        # unresolved tokens fall through as plain CSV period names.
+        # explicit start/end dates (bypassing the CSV name lookup).  A token no
+        # dynamic resolver claims is next tried against the combined
+        # period-name index (loaded rows + configured calendar files), so a
+        # name that lives only in a calendar file (e.g. PI28-01 in
+        # pi-periods.csv) still resolves.  Anything still unresolved falls
+        # through as a plain name for generator.find_period_window to match
+        # against the loaded rows (preserving the original error on a miss).
         period_names = []
         expr_windows = []  # (start, end) windows from resolved dynamic tokens
         if "period" in self.options:
@@ -601,6 +662,8 @@ class RoadmapDirective(Directive):
                     )
                 except period_expr.PeriodExprError as exc:
                     raise ValueError(f"period {tok!r}: {exc}")
+                if window is None:
+                    window = period_name_index.get(tok.strip().lower())
                 if window is not None:
                     expr_windows.append(window)
                 else:
@@ -1087,6 +1150,219 @@ class RoadmapDirective(Directive):
                 f"calendar keyword)"
             )
         return window[0] if edge == "start" else window[1]
+
+    # ------------------------------------------------------------------
+    # Period-name index (loaded rows + configured calendar files)
+    # ------------------------------------------------------------------
+
+    def _build_period_name_index(self, lookup_items, expr_ctx, warn):
+        """Return a case-insensitive ``name -> (start, end)`` window index.
+
+        The index is built from two sources, in order of precedence:
+
+        1. **Loaded roadmap rows** (*lookup_items*) whose ``start`` / ``end``
+           cells are concrete ISO dates — including rows from ``norender``
+           reference files.
+        2. **Configured period-calendar files**
+           (``doxtr_roadmap_period_calendars``).  Every calendar file is
+           loaded once (via the injected ``expr_ctx.load_calendar``) and its
+           rows contribute their names too.  This lets a bare period *name*
+           such as ``PI28-01`` — or a ``@PI28-01`` cell reference — resolve
+           against the same ``pi-periods.csv`` that backs the ``current-pi``
+           keyword, **without** having to list that file in ``:file:``.
+
+        Loaded rows win over calendar rows on a name clash (the explicitly
+        loaded data is authoritative).  When a name occurs on several rows the
+        window spans their combined earliest-start / latest-end, mirroring
+        :func:`generator.find_period_window`.
+
+        Parameters
+        ----------
+        lookup_items:
+            Parsed sections list (rendered rows plus ``norender`` rows).
+        expr_ctx:
+            :class:`period_expr.ResolutionContext` — supplies the calendar
+            loader, srcdir/docdir, and dependency-note callback.
+        warn:
+            Non-fatal diagnostic callback (calendar-load problems are warned,
+            not raised, so a broken calendar never blocks name resolution
+            against the loaded rows).
+
+        Returns
+        -------
+        dict
+            ``{lower_name: (datetime.date, datetime.date)}``.
+        """
+        index: dict = {}
+
+        def _add(name, start_d, end_d):
+            key = (name or "").strip().lower()
+            if not key:
+                return
+            if key in index:
+                prev_s, prev_e = index[key]
+                index[key] = (min(prev_s, start_d), max(prev_e, end_d))
+            else:
+                index[key] = (start_d, end_d)
+
+        # Step 1 (lower precedence): configured period-calendar files, added
+        # first so the loaded rows below can overwrite them on a name clash.
+        calendars = (expr_ctx.config or {}).get("period_calendars") or {}
+        seen_paths: set = set()
+        for key, spec in calendars.items():
+            spec_file = spec if isinstance(spec, str) else (
+                spec.get("file") if isinstance(spec, dict) else None
+            )
+            if not spec_file:
+                continue
+            section = None
+            if isinstance(spec, dict):
+                section = spec.get("section")
+            try:
+                abspath = period_expr._resolve_calendar_file(spec_file, expr_ctx)
+                abspath = os.path.abspath(abspath)
+                if abspath in seen_paths:
+                    continue
+                seen_paths.add(abspath)
+                if expr_ctx.load_calendar is None:
+                    continue
+                rows = expr_ctx.load_calendar(abspath)
+            except (OSError, csv.Error, ValueError,
+                    period_expr.PeriodExprError) as exc:
+                # Non-fatal: a broken/unreadable calendar must not block name
+                # resolution against the loaded rows.  Genuinely unexpected
+                # exceptions (e.g. programming errors) are left to propagate.
+                if warn is not None:
+                    warn(
+                        f"[doxtr-roadmap] could not load period calendar "
+                        f"{key!r} ({spec_file!r}) for name resolution: {exc}"
+                    )
+                continue
+            want = section.strip().lower() if section else None
+            for row in rows:
+                r_name, r_start, r_end = row[0], row[1], row[2]
+                if want is not None:
+                    r_section = row[3] if len(row) > 3 else None
+                    if (r_section or "").strip().lower() != want:
+                        continue
+                _add(r_name, r_start, r_end)
+
+        # Step 2 (higher precedence): loaded rows, added last so they override
+        # calendar entries on a name clash.  The first loaded row for a name
+        # *replaces* any calendar entry (loaded data is authoritative), while
+        # subsequent loaded rows for that same name merge into the combined
+        # earliest-start / latest-end span, mirroring
+        # :func:`generator.find_period_window`.
+        loaded_keys: set = set()
+        for _section, tasks in lookup_items:
+            for task in tasks:
+                name = task.name if hasattr(task, "name") else task[0]
+                start_str = task.start if hasattr(task, "start") else task[1]
+                end_str = task.end if hasattr(task, "end") else task[2]
+                try:
+                    s = datetime.date.fromisoformat(start_str)
+                    e = datetime.date.fromisoformat(end_str)
+                except (ValueError, TypeError):
+                    continue
+                key = (name or "").strip().lower()
+                if not key:
+                    continue
+                if key in loaded_keys:
+                    # Another loaded row for this name: widen the span.
+                    prev_s, prev_e = index[key]
+                    index[key] = (min(prev_s, s), max(prev_e, e))
+                else:
+                    # First loaded row for this name: replace any calendar entry.
+                    index[key] = (s, e)
+                    loaded_keys.add(key)
+
+        return index
+
+    # ------------------------------------------------------------------
+    # Period references in CSV start/end cells
+    # ------------------------------------------------------------------
+
+    def _resolve_period_cells(self, items, lookup_items, expr_ctx, warn,
+                              name_index):
+        """Expand ``@<period>`` references in every task's start/end cell.
+
+        A start/end cell written as ``@PI27-01`` (or any dynamic expression
+        such as ``@current-pi`` / ``@now()+2 weeks``) is replaced in place with
+        a concrete ISO date: the referenced period's **start** edge for a
+        start cell, its **end** edge for an end cell.  Plain cells (no leading
+        ``@``) are left untouched so strict ISO-date parsing is preserved.
+
+        Plain period *names* (tokens no dynamic resolver claims) are matched
+        case-insensitively against *name_index* — the combined index of the
+        loaded roadmap rows (including ``norender`` reference files) **and**
+        every configured period-calendar file (see
+        :meth:`_build_period_name_index`).  So ``@PI28-01`` resolves against
+        ``pi-periods.csv`` even when only ``roadmap.csv`` is listed in
+        ``:file:``.
+
+        Parameters
+        ----------
+        items:
+            Sections list of rendered rows (mutated copy returned).
+        lookup_items:
+            Sections list; when it is the same object as *items* one rewrite
+            covers both.
+        expr_ctx:
+            :class:`period_expr.ResolutionContext` for dynamic resolution.
+        warn:
+            Non-fatal diagnostic callback.
+        name_index:
+            Prebuilt case-insensitive ``name -> (start, end)`` map from
+            :meth:`_build_period_name_index`.
+
+        Returns
+        -------
+        tuple
+            ``(items, lookup_items)`` with period references expanded.  When no
+            cell needed rewriting the original objects are returned unchanged.
+        """
+        def _name_lookup(token):
+            return name_index.get(token.strip().lower())
+
+        def _rewrite(sections):
+            changed = False
+            out_sections = []
+            for section, tasks in sections:
+                out_tasks = []
+                for task in tasks:
+                    start_cell = task.start if hasattr(task, "start") else task[1]
+                    end_cell = task.end if hasattr(task, "end") else task[2]
+                    new_start = start_cell
+                    new_end = end_cell
+                    if period_expr.is_period_ref(start_cell):
+                        new_start = period_expr.resolve_cell_edge(
+                            start_cell, "start", expr_ctx,
+                            name_lookup=_name_lookup, warn=warn,
+                        )
+                    if period_expr.is_period_ref(end_cell):
+                        new_end = period_expr.resolve_cell_edge(
+                            end_cell, "end", expr_ctx,
+                            name_lookup=_name_lookup, warn=warn,
+                        )
+                    if new_start != start_cell or new_end != end_cell:
+                        changed = True
+                        if hasattr(task, "_replace"):
+                            task = task._replace(start=new_start, end=new_end)
+                        else:
+                            task = list(task)
+                            task[1] = new_start
+                            task[2] = new_end
+                    out_tasks.append(task)
+                out_sections.append((section, out_tasks))
+            return (out_sections if changed else sections), changed
+
+        same_object = items is lookup_items
+        new_items, items_changed = _rewrite(items)
+        if same_object:
+            # One rewrite covers both when they are the same list object.
+            return new_items, new_items
+        new_lookup, _ = _rewrite(lookup_items)
+        return new_items, new_lookup
 
     # ------------------------------------------------------------------
     # Multi-file / glob file loading
