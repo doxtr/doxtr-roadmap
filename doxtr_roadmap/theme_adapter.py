@@ -16,6 +16,13 @@ from .config_defaults import DEFAULT_CONFIG, _deep_merge
 
 logger = logging.getLogger(__name__)
 
+# Package name of the optional PDF theme-core integration.  Defined here — in
+# the integration-boundary module — so it is the single seam that names the
+# theme-core package.  The auto-load helper in ``__init__`` imports this
+# constant rather than repeating the literal, keeping the name in sync across
+# the load (``__init__``) and read/detect (this module) touch points.
+_THEME_CORE_PACKAGE = "doxtr_pdf_theme_core"
+
 # Seed colour used when the dark-mode context provides no text_color and we
 # must derive a readable label by soft-inverting the default black.
 _DARK_LABEL_INVERT_SEED = "#000000"
@@ -68,7 +75,7 @@ def _theme_core_loaded(config) -> bool:
         True if theme-core is loaded and initialised for this build.
     """
     extensions = getattr(config, "extensions", None) or []
-    if "doxtr_pdf_theme_core" in extensions:
+    if _THEME_CORE_PACKAGE in extensions:
         return True
     # Transitive load: theme-core's config-inited hook set this resolved value
     # even though it is absent from the user's conf.py extensions list. A
@@ -346,8 +353,9 @@ def get_effective_style(config) -> dict:
         if not core_present:
             logger.warning(
                 "doxtr-roadmap: doxtr_roadmap_use_theme_core=True but "
-                "'doxtr_pdf_theme_core' is not in extensions; "
-                "falling back to default style."
+                "'%s' is not in extensions; "
+                "falling back to default style.",
+                _THEME_CORE_PACKAGE,
             )
         else:
             theme_partial = _read_theme_core(config)

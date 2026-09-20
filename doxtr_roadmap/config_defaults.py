@@ -69,6 +69,18 @@ DEFAULT_CONFIG = {
     # ----- Closed (non-working) day styling ---------------------------
     "closed": {"background_color": None},
 
+    # ----- Theme-core auto-loading ------------------------------------
+    # When True (default) doxtr_roadmap loads ``doxtr_pdf_theme_core``
+    # automatically at setup() time via ``app.setup_extension`` *if* the
+    # package is importable, so users no longer have to add it to their
+    # conf.py ``extensions`` list to get the palette / dark-mode integration.
+    # theme-core remains an optional dependency: when it is not installed the
+    # auto-load is silently skipped and the extension degrades to its own
+    # defaults.  Set to False to opt out of auto-loading entirely (e.g. a child
+    # theme that supplies its own rendering / palette and does not want
+    # theme-core pulled in behind its back).
+    "autoload_theme_core": True,
+
     # ----- Theme-core integration -------------------------------------
     # "auto"  → active iff doxtr_pdf_theme_core is loaded for this build
     #            (either listed in config.extensions OR pulled in transitively

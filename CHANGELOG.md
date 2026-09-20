@@ -5,7 +5,27 @@ All notable changes to `doxtr-roadmap` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — Per-file column suppression and reference-only files
+## [0.1.3] — 2026-09-20
+
+### Added
+
+- **Automatic loading of `doxtr_pdf_theme_core`** — when the
+  `doxtr_pdf_theme_core` package is installed, `doxtr_roadmap` now loads it
+  automatically at extension setup (via `app.setup_extension`), so the palette
+  / typography / dark-mode integration activates with zero configuration.
+  Users no longer need to add `doxtr_pdf_theme_core` to their `conf.py`
+  `extensions` list by hand. theme-core remains an *optional* dependency: when
+  it is not installed the auto-load is silently skipped and the extension
+  degrades to its own defaults. A new boolean config value
+  `doxtr_roadmap_autoload_theme_core` (default `True`) opts out of the
+  auto-load — e.g. for a child theme that supplies its own rendering and does
+  not want theme-core pulled in. This is independent of
+  `doxtr_roadmap_use_theme_core`, which continues to control whether a *loaded*
+  theme-core's palette is *read* into the roadmap style (`"auto"` still
+  activates whenever theme-core is loaded, whether listed explicitly or
+  auto-loaded).
+
+This release also consolidates the previously-unreleased work below.
 
 ### Fixed
 

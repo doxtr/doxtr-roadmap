@@ -10,10 +10,11 @@ __version__
     Package version string.
 """
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 import shlex
 import subprocess
+import importlib.util
 
 from sphinx.util import logging
 
@@ -23,6 +24,90 @@ logger = logging.getLogger(__name__)
 # Config defaults (canonical source of truth)
 # ---------------------------------------------------------------------------
 from .config_defaults import DEFAULT_CONFIG
+# The theme-core package name lives in theme_adapter (the integration-boundary
+# module) so both the auto-load helper here and the detection/read logic there
+# share one source of truth for the package name.
+from .theme_adapter import _THEME_CORE_PACKAGE
+
+
+def _autoload_theme_core(app):
+    """Auto-load ``doxtr_pdf_theme_core`` when it is installed.
+
+    doxtr-roadmap integrates with ``doxtr_pdf_theme_core`` (semantic palette,
+    typography, dark-mode colours) but the integration is *optional*: the
+    extension works fully without theme-core installed.  Historically a user
+    had to add ``doxtr_pdf_theme_core`` to their ``conf.py`` ``extensions``
+    list by hand to activate the integration.  This helper removes that manual
+    step: when the package is importable it is loaded automatically via
+    :meth:`sphinx.application.Sphinx.setup_extension` (a documented no-op if the
+    user already listed it), so the ``use_theme_core="auto"`` detection in
+    :mod:`theme_adapter` then sees theme-core as loaded and the palette /
+    dark-mode integration activates with zero configuration.
+
+    Config timing
+    ~~~~~~~~~~~~~~
+    This runs from :func:`setup` *after* the ``doxtr_roadmap_autoload_theme_core``
+    config value has been registered with :meth:`app.add_config_value`.  Sphinx
+    reads ``conf.py`` (``Config.read``) *before* invoking each extension's
+    ``setup()``, so reading ``app.config.doxtr_roadmap_autoload_theme_core``
+    here correctly resolves, in order: a CLI ``-D`` override, the user's
+    ``conf.py`` value, then the registered default.  It must run during
+    ``setup()`` (not a later ``builder-inited`` hook) so theme-core's own
+    ``setup()`` and ``config-inited`` hooks register in time.
+
+    Graceful degradation
+    ~~~~~~~~~~~~~~~~~~~~~~
+    * When the user set ``doxtr_roadmap_autoload_theme_core = False`` the
+      auto-load is skipped entirely (a child theme supplying its own rendering
+      can opt out this way).
+    * When the package is not importable nothing happens — the extension keeps
+      working with its own defaults.
+    * Any unexpected error from ``setup_extension`` is logged at info level and
+      swallowed, never crashing the build over an optional integration.
+
+    Parameters
+    ----------
+    app:
+        The Sphinx application object.
+    """
+    # Read the resolved config value.  Safe to read now: setup() registered the
+    # value with app.add_config_value just before calling this helper, and
+    # conf.py / overrides were populated by Config.read before setup() ran.
+    if not getattr(app.config, "doxtr_roadmap_autoload_theme_core", True):
+        logger.debug(
+            "[doxtr-roadmap] auto-load of %s disabled via "
+            "doxtr_roadmap_autoload_theme_core=False.",
+            _THEME_CORE_PACKAGE,
+        )
+        return
+
+    # Only load when the package is actually importable; find_spec does not
+    # import or execute the package, so an absent theme-core costs nothing.
+    if importlib.util.find_spec(_THEME_CORE_PACKAGE) is None:
+        logger.debug(
+            "[doxtr-roadmap] %s is not installed; skipping auto-load. "
+            "The extension works without it (theme-core integration inactive).",
+            _THEME_CORE_PACKAGE,
+        )
+        return
+
+    try:
+        # No-op if the user already listed theme-core in conf.py extensions.
+        app.setup_extension(_THEME_CORE_PACKAGE)
+        logger.debug(
+            "[doxtr-roadmap] auto-loaded %s (installed and "
+            "doxtr_roadmap_autoload_theme_core enabled).",
+            _THEME_CORE_PACKAGE,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        # An optional integration must never abort the build.
+        logger.info(
+            "[doxtr-roadmap] could not auto-load %s (%s); continuing without "
+            "the theme-core integration.",
+            _THEME_CORE_PACKAGE,
+            exc,
+        )
+
 
 def _check_plantuml_loaded(app):
     """Verify sphinxcontrib.plantuml is in extensions; raise ExtensionError if not."""
@@ -170,10 +255,17 @@ def setup(app):
     """Sphinx extension entry point.
 
     Registers all ``doxtr_roadmap_*`` config values (including
-    ``doxtr_roadmap_diagram_background_color`` and
-    ``doxtr_roadmap_foreground_color``), the ``.. roadmap::`` directive, and
+    ``doxtr_roadmap_diagram_background_color``,
+    ``doxtr_roadmap_foreground_color`` and
+    ``doxtr_roadmap_autoload_theme_core``), the ``.. roadmap::`` directive, and
     ``builder-inited`` hooks that verify sphinxcontrib.plantuml is loaded and
     that the installed PlantUML meets the minimum version requirement.
+
+    When ``doxtr_roadmap_autoload_theme_core`` is enabled (the default) and
+    ``doxtr_pdf_theme_core`` is importable, this also auto-loads theme-core via
+    :meth:`app.setup_extension` so the palette / dark-mode integration works
+    without the user adding theme-core to ``conf.py`` ``extensions`` by hand.
+    See :func:`_autoload_theme_core`.
 
     Parameters
     ----------
@@ -189,8 +281,9 @@ def setup(app):
 
     cfg = DEFAULT_CONFIG
 
-    # Register all 14 config values (all 'env' rebuild type so changes trigger
-    # a full environment rebuild, matching the prototype's per-directive nature).
+    # Register all doxtr_roadmap_* config values (all 'env' rebuild type so
+    # changes trigger a full environment rebuild, matching the prototype's
+    # per-directive nature).
     app.add_config_value("doxtr_roadmap_default_scale",
                          cfg["default_scale"], "env")
     app.add_config_value("doxtr_roadmap_scale_factor",
@@ -216,12 +309,17 @@ def setup(app):
                          cfg["closed"], "env")
     app.add_config_value("doxtr_roadmap_use_theme_core",
                          cfg["use_theme_core"], "env")
+    # Auto-load theme-core when installed (opt-out via False). Registered here
+    # so _autoload_theme_core (called at the end of setup) can read the
+    # resolved conf.py/override/default value.
+    app.add_config_value("doxtr_roadmap_autoload_theme_core",
+                         cfg["autoload_theme_core"], "env", types=(bool,))
     app.add_config_value("doxtr_roadmap_allowed_tags",
                          cfg["allowed_tags"], "env")
     app.add_config_value("doxtr_roadmap_allowed_tag_patterns",
                          cfg["allowed_tag_patterns"], "env")
 
-    # Collision-detection config values (16th–18th config values)
+    # Collision-detection config values
     app.add_config_value("doxtr_roadmap_collision_detection",
                          cfg["collision_detection"], "env")
     app.add_config_value("doxtr_roadmap_collision_char_width_factor",
@@ -285,6 +383,11 @@ def setup(app):
     )
 
     app.add_directive("roadmap", RoadmapDirective)
+
+    # Auto-load the optional theme-core integration (no-op when the package is
+    # absent or the user opted out). Done during setup() — not a later hook —
+    # so theme-core's own setup()/config-inited hooks register in time.
+    _autoload_theme_core(app)
 
     # Connection order matters: per-build state init first, then loaded-check,
     # then version-check.

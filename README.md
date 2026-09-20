@@ -19,7 +19,7 @@ Requires `sphinxcontrib-plantuml>=0.9` (listed as a dependency).
 
 ## Quick Start
 
-Add both extensions to your `conf.py`:
+Add the extension to your `conf.py`:
 
 ```python
 extensions = [
@@ -27,6 +27,14 @@ extensions = [
     "doxtr_roadmap",
 ]
 ```
+
+`doxtr_roadmap` loads the optional `doxtr_pdf_theme_core` integration
+automatically when that package is installed — you do **not** need to add
+`doxtr_pdf_theme_core` to `extensions` yourself. When theme-core is not
+installed the extension works exactly the same, just without the palette /
+dark-mode integration. To opt out of the auto-load, set
+`doxtr_roadmap_autoload_theme_core = False` (see [Theme-core
+integration](#theme-core-integration)).
 
 Then use the directive in any RST document:
 
@@ -459,16 +467,47 @@ doxtr_roadmap_allowed_tags = {
     "security": "Security",
 }
 doxtr_roadmap_allowed_tag_patterns = {}
+
+# Theme-core auto-loading (default True). When doxtr_pdf_theme_core is
+# installed it is loaded automatically so its palette / dark-mode integration
+# activates without listing it in `extensions`. Set to False to opt out (a
+# child theme with its own rendering, or a build that must not pull in
+# theme-core). No effect when theme-core is not installed.
+# See the "Theme-core integration" section.
+doxtr_roadmap_autoload_theme_core = True
 ```
 
 ### Theme-core integration
 
-When `doxtr_pdf_theme_core` is in `extensions`, the roadmap extension
-automatically reads its semantic palette and typography:
+When `doxtr_pdf_theme_core` is installed, the roadmap extension **loads it
+automatically** (via `app.setup_extension`) and reads its semantic palette and
+typography — you do not need to add `doxtr_pdf_theme_core` to `extensions` in
+your `conf.py`:
 
 ```python
+# Auto-load theme-core when it is installed (default True). Set to False to
+# opt out — e.g. a child theme that supplies its own rendering / palette and
+# does not want theme-core pulled in behind its back. When theme-core is not
+# installed this option has no effect (nothing is loaded and the extension
+# degrades to its own defaults).
+doxtr_roadmap_autoload_theme_core = True
+
 doxtr_roadmap_use_theme_core = "auto"  # "auto" | True | False
 ```
+
+The two options are independent levers:
+
+- `doxtr_roadmap_autoload_theme_core` controls whether theme-core is *loaded*
+  automatically when installed.
+- `doxtr_roadmap_use_theme_core` controls whether a *loaded* theme-core's
+  palette / typography is *read* into the roadmap style. With the default
+  `"auto"`, the integration activates whenever theme-core is loaded — whether
+  you listed it in `extensions` yourself or it was auto-loaded.
+
+To get the integration you now only need theme-core installed; to disable it
+entirely, either uninstall theme-core, set
+`doxtr_roadmap_autoload_theme_core = False` (and don't list it in
+`extensions`), or set `doxtr_roadmap_use_theme_core = False`.
 
 | Palette key  | Maps to              |
 |--------------|----------------------|
