@@ -138,11 +138,61 @@ required; every other column is optional and may be omitted entirely:
 | `row_group` | no       | Tasks sharing this non-empty value render on one Gantt row |
 | `link`      | no       | Plain URL or `:xlink:\`id\`` role expression |
 | `tags`      | no       | Comma-separated tag list |
+| `color`     | no       | Bar *done* (fill) colour: a semantic `doxtr_pdf_theme_core` expression (`dd:primary`, `dd:#FFCC00:lighten:80`) or a `#hex` value (`#123456`, `#4567896F` with alpha). Blank inherits (see [Task colours](#task-colours)); `default` resets to the roadmap default. A contrasting frame is derived automatically |
 
 ### Subtasks
 
 A row whose `section` column matches an existing top-level task name becomes a
 subtask, inserted directly beneath the parent task in the same section.
+
+A subtask may itself be named as the `section` of deeper rows, so subtasks
+nest to arbitrary depth (sub-sub-…tasks).
+
+### Task colours
+
+An optional `color` column sets a bar's *done* (fill) colour directly from the
+CSV. Values may be:
+
+- a **semantic** `doxtr_pdf_theme_core` expression — `dd:primary`,
+  `dd:secondary`, `dd:#FFCC00:lighten:80`, etc. — resolved against the active
+  light/dark palette; or
+- a **hex** colour: `#123456`, or `#4567896F` (with alpha).
+
+The colour sets the *done* portion; a matching *frame* border is derived
+automatically (see [`frame_brightness_delta`](#configuration)), and the
+*undone* (remaining) portion is derived from the done colour too (see
+[`undone_brightness_delta`](#configuration)).
+
+**Inheritance:**
+
+- A **section's** colour is the colour of the *first* row in that section that
+  carries a colour; other rows in the section inherit it.
+- A **subtask** with a blank `color` cell inherits its parent's *effective*
+  colour, recursively down the whole chain (sub-sub-…tasks included). A colour
+  set on any task overrides inheritance from that task downward.
+- The sentinel **`color=default`** (case-insensitive) resets a task back to the
+  roadmap default colour and stops inheritance at that task.
+
+**Dark mode:** semantic `dd:` colours resolve against the dark palette, and raw
+hex colours are soft-inverted, so bars stay legible on the dark page.
+
+**Without theme-core:** `dd:` expressions require `doxtr_pdf_theme_core`; when
+it is not installed a `dd:` colour warns once and falls back to the default
+colour. Raw `#hex` colours work with or without theme-core.
+
+```
+section,name,start,end,row_group,link,tags,color
+Platform,Backend Overhaul,2027-01-15,2027-04-30,,,eng,dd:primary
+Platform,Backend Overhaul 2,2027-05-01,2027-06-30,,,eng,
+Platform,Auth Rework,2027-02-01,2027-05-31,,,eng,#2E7D32
+Auth Rework,SSO,2027-02-01,2027-03-15,,,eng,
+Auth Rework,MFA,2027-03-16,2027-05-31,,,eng,#6A1B9A
+DefaultColor,Docs Cleanup,2027-01-15,2027-04-30,,,docs,
+```
+
+Here `Backend Overhaul 2` inherits `dd:primary` from the first `Platform` row,
+`SSO` inherits `#2E7D32` from its parent `Auth Rework`, `MFA` overrides it with
+`#6A1B9A`, and the `DefaultColor` section keeps the roadmap default.
 
 ### Milestones
 
@@ -374,6 +424,17 @@ doxtr_roadmap_bar = {
     "done_color": "#FF8C00",
     "undone_color": "#FFF3E0",
     "frame_color": None,
+    # Derive each *coloured* bar's frame border from its fill by this percent
+    # (default 30). A light fill is darkened, a dark fill lightened, so the
+    # border always contrasts. 0 disables per-task frame derivation.
+    "frame_brightness_delta": 30,
+    # Derive the *undone* (remaining) bar background from `done_color`: this
+    # percent LIGHTER in light mode and DARKER in dark mode (default 88.7,
+    # chosen so #FF8C00 -> ~#FFF3E0). PlantUML gantt has only one global undone
+    # colour, so this applies to every bar. A user `undone_color` override
+    # wins; 0 disables derivation (keeps the literal `undone_color`). Only
+    # applied for the built-in renderer.
+    "undone_brightness_delta": 88.7,
 }
 
 doxtr_roadmap_sections = {
@@ -459,6 +520,21 @@ doxtr_roadmap_period_resolver_hooks = []
 # full or common abbreviations) or integers (Mon=0 .. Sun=6), e.g.
 # ["monday", "wednesday", "saturday"] or [0, 2, 5] for a Mon/Wed/Sat week.
 doxtr_roadmap_business_days = None
+
+# Renderer override (default None → built-in generator). Dotted path
+# ("module.callable" or "module:callable") to a drop-in replacement with the
+# same signature as doxtr_roadmap.generator.generate_puml. Lets a child theme
+# replace the whole PlantUML generation without monkeypatching or forking.
+# See the "Replacing the renderer (child themes)" section.
+doxtr_roadmap_renderer = None
+
+# Colour-engine override: dotted path to a factory (config, frame_delta) ->
+# resolver, where resolver is a callable
+# (expr, default_done, default_frame) -> (done_hex, frame_hex_or_None).
+# None (default) uses the built-in ColorResolver. Lets a child theme replace
+# the whole colour-expression engine (custom grammar, palette source,
+# brightness algorithm) independently of the renderer, without forking.
+doxtr_roadmap_color_resolver = None
 
 # Tag allow-lists (optional)
 doxtr_roadmap_allowed_tags = {
@@ -577,6 +653,72 @@ When `sphinxcontrib.xlink` is in `extensions`, the `link` CSV column accepts
 
 If xlink is not loaded, xlink-style cells produce a one-time warning and the
 link is silently skipped.
+
+**Special-character safety.** Task names and resolved link titles are
+automatically escaped/sanitized before they are written into the PlantUML
+source so they render *verbatim* instead of being interpreted as PlantUML
+syntax. Square brackets in a task name (or its internal id) are replaced with
+parentheses so they cannot break the `[name] as [pid]` delimiters, and
+structural characters in a link title (`& < > [ ] ' ~ "`) plus paired Creole
+formatting digraphs (`//`, `**`, `__`, `--`) are replaced with HTML entities
+that PlantUML renders back as the original characters. You can therefore use
+link titles like `A & B <x>` without corrupting the diagram.
+
+### Replacing the renderer (child themes)
+
+A child theme (or any downstream project) can replace the **entire** PlantUML
+generation with its own renderer — no monkeypatching or forking — by pointing
+`doxtr_roadmap_renderer` at a dotted path to a callable with the same
+signature as `doxtr_roadmap.generator.generate_puml`:
+
+```python
+# conf.py
+doxtr_roadmap_renderer = "my_theme.roadmap:render_gantt"   # None (default) = built-in
+```
+
+The callable receives the same keyword arguments the built-in generator does
+(`items`, `config`, `project_start`, `project_end`, `scale`,
+`close_weekends`, `title`, `link_resolver`) and must return a PlantUML source
+string. When unset (the default `None`) the built-in
+`generator.generate_puml` is used, so existing projects are unaffected. Both
+the dotted-path form (`module.callable`) and the colon form
+(`module:callable`) are accepted, matching
+`doxtr_roadmap_period_resolver_hooks`.
+
+A newer optional keyword, `color_resolver`, is also passed **only when the
+renderer's signature accepts it** (an explicit `color_resolver=` parameter or
+`**kwargs`). To stay forward-compatible with keywords added in future
+releases, a custom renderer should declare `**kwargs`:
+
+```python
+def render_gantt(items, config, *, color_resolver=None, **kwargs):
+    ...
+```
+
+A renderer that accepts neither `color_resolver` nor `**kwargs` still works,
+but will not receive per-task colours (a one-time DEBUG log notes this).
+
+#### Replacing the colour engine
+
+The colour-expression engine is a separate seam from the renderer. Point
+`doxtr_roadmap_color_resolver` at a dotted path to a **factory**
+`(config, frame_delta) -> resolver`, where *resolver* is a callable
+`(expr, default_done, default_frame) -> (done_hex, frame_hex_or_None)` (the
+same contract as the built-in `ColorResolver.resolve`):
+
+```python
+# conf.py
+doxtr_roadmap_color_resolver = "my_theme.roadmap:make_color_resolver"
+```
+
+This lets a child theme support a custom colour grammar, palette source, or
+brightness algorithm without replacing the renderer. When unset (default
+`None`) the built-in `ColorResolver.from_config` is used.
+
+> Note: the built-in *undone*-colour derivation runs only for the built-in
+> renderer. A child theme that sets `doxtr_roadmap_renderer` receives the raw
+> `undone_color` and owns all colour maths itself.
+
 
 ## Figures and the List of Figures
 
@@ -862,7 +1004,11 @@ a single chart:
 
 The detection algorithm estimates each label's horizontal footprint using a
 per-scale days-per-character mapping (`daily` ≈ 1.1, `weekly` ≈ 4, `monthly`
-≈ 9), multiplied by `collision_char_width_factor`.  Within each `row_group`
+≈ 9), multiplied by `collision_char_width_factor`.  The estimate is also
+divided by the effective `:column-zoom:` factor, since a wider column
+represents the same number of days — so zoom is accounted for automatically
+and you do **not** need to compensate `:collision-char-width-factor:` for it
+by hand.  Within each `row_group`
 tasks are packed into lanes using a greedy first-fit strategy: each task is
 placed on the first lane whose last task's footprint does not overlap; if all
 lanes are blocked, a new lane is opened.  Different lanes render as separate
@@ -892,6 +1038,13 @@ The `:column-zoom:` directive option overrides the global setting per chart:
    :column-zoom: 3
    :file: roadmap.csv
 ```
+
+Column zoom is automatically factored into [collision
+detection](#collision-detection): because a wider column still represents the
+same number of days, each label covers proportionally fewer calendar days on
+screen.  The detector divides its label estimate by the effective zoom, so
+labels are not falsely reported as colliding at high zoom and no manual
+`:collision-char-width-factor:` tuning is required to compensate for it.
 
 The `:width:` directive option (e.g. `:width: 100%`) forces the rendered
 image to fill the available text/page width in HTML and PDF.  This is handled

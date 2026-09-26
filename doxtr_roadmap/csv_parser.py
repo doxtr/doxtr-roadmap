@@ -4,7 +4,7 @@ Loads roadmap items from a CSV file or an inline string, returns a structured
 list suitable for :func:`generator.generate_puml`.
 
 CSV columns (canonical names):
-    section, name, start, end, row_group, link, tags
+    section, name, start, end, row_group, link, tags, color
 
 Two-pass subtask detection:
     Pass 1 — collect all top-level task names.
@@ -34,7 +34,14 @@ from typing import NamedTuple, Optional
 # ---------------------------------------------------------------------------
 
 #: Canonical CSV column names understood by the parser.
-COLUMNS = ("section", "name", "start", "end", "row_group", "link", "tags")
+COLUMNS = (
+    "section", "name", "start", "end", "row_group", "link", "tags", "color",
+)
+
+#: Sentinel value in the ``color`` column that resets the effective colour back
+#: to the roadmap default (i.e. stops inheritance and falls back to
+#: ``bar.done_color``).  Compared case-insensitively.
+COLOR_DEFAULT_SENTINEL = "default"
 
 #: Columns that are strictly required to render a bar and therefore may never
 #: be blanked via a per-file ``ignore=`` option.  ``section`` is not required
@@ -68,6 +75,14 @@ class TaskItem(NamedTuple):
     is_subtask:
         ``True`` when this row is a subtask (its CSV ``section`` column named
         a parent task rather than a section heading).
+    color:
+        The *effective* colour expression for this task after inheritance has
+        been resolved by :func:`_resolve_colors`.  This is a raw, unresolved
+        expression (a semantic ``dd:`` expression or a ``#hex`` string) — the
+        mapping from expression to a static hex value happens later, in the
+        directive, where the theme-core palette / dark-mode context is
+        available.  ``None`` means "use the roadmap default colour" (either the
+        section had no colour at all, or a ``default`` sentinel reset it).
     row_group:
         Non-empty string when this task shares a Gantt row with others in the
         same group; ``None`` otherwise.
@@ -85,6 +100,7 @@ class TaskItem(NamedTuple):
     is_subtask: bool
     row_group: Optional[str]
     pid: str
+    color: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +262,7 @@ def _parse_rows(rows_iter) -> list:
     Returns a list of ``(section_name, tasks)`` tuples.  Each task is a
     :class:`TaskItem` with fields::
 
-        TaskItem(name, start, end, link, tags, is_subtask, row_group, pid)
+        TaskItem(name, start, end, link, tags, is_subtask, row_group, pid, color)
 
     The *pid* field is filled in by :func:`_assign_task_ids` after the two
     passes; the ``row_group`` and ``pid`` fields are set in pass 2 (``pid``
@@ -272,6 +288,7 @@ def _parse_rows(rows_iter) -> list:
         group = (row.get("row_group") or "").strip() or None
         tags_cell = (row.get("tags") or "").strip()
         link_cell = (row.get("link") or "").strip()
+        color_cell = (row.get("color") or "").strip()
 
         rows.append({
             "first":  row.get("section", "").strip(),
@@ -281,21 +298,30 @@ def _parse_rows(rows_iter) -> list:
             "end":    row.get("end", "").strip(),
             "link":   link_cell,
             "tags":   tags_cell,
+            "color":  color_cell,
         })
 
     if not rows:
         return []
 
-    # Pass 1: collect names of all rows — a row is a top-level task when its
-    # ``first`` column does NOT match any row's ``name`` (i.e. names a section,
-    # not a parent task).
+    # Pass 1: collect names of all rows.  A row's ``first`` (section) column
+    # names a *parent task* when it matches some row's ``name``; otherwise it
+    # names a section heading.  Subtasks may themselves parent deeper subtasks
+    # (sub-sub-…tasks), so parent detection keys on the full set of task
+    # names, not only the top-level ones.
     task_names = {r["name"] for r in rows}
-    top_level_names = {r["name"] for r in rows if r["first"] not in task_names}
 
     # Pass 2: build sections in row order, inserting subtasks after parents.
     sections = []
     section_index = {}
-    task_pos = {}  # parent task name → (section_idx, task_list_index)
+    task_pos = {}   # task name → (section_idx, task_list_index)
+    # task name → parent task name (None for top-level tasks).  Used by
+    # _resolve_colors to walk the inheritance chain for recursive nesting.
+    task_parent = {}
+    # (section_idx, task_list_index) → depth (0 = top-level, 1 = subtask, …).
+    # Stored keyed by identity of the task's position so _resolve_colors can
+    # reconstruct nesting for arbitrary depth.
+    task_depth = {}
 
     def _ensure_section(name):
         if name not in section_index:
@@ -315,39 +341,97 @@ def _parse_rows(rows_iter) -> list:
             is_subtask=False,  # may be overridden below
             row_group=r["group"],
             pid="",  # placeholder; filled by _assign_task_ids
+            color=r["color"] or None,  # raw cell; resolved by _resolve_colors
         )
-        if (
-            first in top_level_names
+        # ``first`` names a parent task (rather than a section) when it matches
+        # some row's name, is not itself already a section header, and is not
+        # this same row.  This holds for arbitrarily deep nesting: a subtask
+        # can name another subtask as its parent.
+        is_child = (
+            first in task_names
             and first not in section_index
-            and first in task_names
             and first != name
-        ):
-            # 'first' names a parent task → attach as subtask right after it.
-            if first not in task_pos:
+            and first in task_pos
+        )
+        parent_unresolved = (
+            first in task_names
+            and first not in section_index
+            and first != name
+            and first not in task_pos
+        )
+        if is_child:
+            sec_idx, parent_pos = task_pos[first]
+            tasks = sections[sec_idx][1]
+            parent_depth = task_depth[(sec_idx, parent_pos)]
+            # Insert after the parent and its entire existing descendant
+            # subtree (any following tasks whose depth is greater than the
+            # parent's), so sibling subtasks stay grouped under their parent.
+            insert_at = parent_pos + 1
+            while insert_at < len(tasks) and (
+                task_depth.get((sec_idx, insert_at), 0) > parent_depth
+            ):
+                insert_at += 1
+            # Shift the recorded positions of every task at/after the insertion
+            # point in this section by one, keeping task_pos / task_depth
+            # consistent after the list grows.
+            _shift_positions(task_pos, task_depth, sec_idx, insert_at)
+            tasks.insert(insert_at, entry._replace(is_subtask=True))
+            task_pos[name] = (sec_idx, insert_at)
+            task_depth[(sec_idx, insert_at)] = parent_depth + 1
+            task_parent[name] = first
+        else:
+            if parent_unresolved:
                 warnings.warn(
                     f"doxtr-roadmap: subtask '{name}' references parent '{first}' "
                     f"which has not been seen yet; treating '{first}' as a section.",
                     UserWarning,
                     stacklevel=2,
                 )
-                idx = _ensure_section(first)
-                sections[idx][1].append(entry._replace(is_subtask=False))
-                task_pos[name] = (idx, len(sections[idx][1]) - 1)
-                continue
-            sec_idx, parent_pos = task_pos[first]
-            tasks = sections[sec_idx][1]
-            # Insert after the parent and any subtasks already attached to it.
-            insert_at = parent_pos + 1
-            while insert_at < len(tasks) and tasks[insert_at].is_subtask:
-                insert_at += 1
-            tasks.insert(insert_at, entry._replace(is_subtask=True))
-        else:
             idx = _ensure_section(first)
-            sections[idx][1].append(entry)
-            task_pos[name] = (idx, len(sections[idx][1]) - 1)
+            tasks = sections[idx][1]
+            tasks.append(entry)
+            pos = len(tasks) - 1
+            task_pos[name] = (idx, pos)
+            task_depth[(idx, pos)] = 0
+            task_parent[name] = None
 
     _assign_task_ids(sections)
+    _resolve_colors(sections, task_parent)
     return sections
+
+
+def _shift_positions(task_pos: dict, task_depth: dict, sec_idx: int, insert_at: int) -> None:
+    """Shift recorded task positions to account for an insertion.
+
+    When a subtask is inserted at ``insert_at`` in section ``sec_idx``, every
+    previously-recorded task whose index in that section is ``>= insert_at``
+    moves one slot to the right.  This helper rewrites both ``task_pos`` (name
+    → position) and ``task_depth`` (position → depth) so they stay consistent
+    with the mutated list.  Iterating over snapshots avoids mutating the dicts
+    while reading them.
+
+    Parameters
+    ----------
+    task_pos:
+        Mapping of task name → ``(section_idx, list_index)``.
+    task_depth:
+        Mapping of ``(section_idx, list_index)`` → nesting depth.
+    sec_idx:
+        Section whose list is being inserted into.
+    insert_at:
+        Index at which a new task is about to be inserted.
+    """
+    for tname, (s_idx, pos) in list(task_pos.items()):
+        if s_idx == sec_idx and pos >= insert_at:
+            task_pos[tname] = (s_idx, pos + 1)
+    shifted = {}
+    for (s_idx, pos), depth in list(task_depth.items()):
+        if s_idx == sec_idx and pos >= insert_at:
+            shifted[(s_idx, pos + 1)] = depth
+        else:
+            shifted[(s_idx, pos)] = depth
+    task_depth.clear()
+    task_depth.update(shifted)
 
 
 def _assign_task_ids(sections: list) -> None:
@@ -359,7 +443,7 @@ def _assign_task_ids(sections: list) -> None:
     Each :class:`TaskItem` is replaced with a new :class:`TaskItem` that has
     the *pid* field filled in::
 
-        TaskItem(name, start, end, link, tags, is_subtask, row_group, pid)
+        TaskItem(name, start, end, link, tags, is_subtask, row_group, pid, color)
 
     .. note::
         Rendering two bars with the same display name requires PlantUML
@@ -379,3 +463,82 @@ def _assign_task_ids(sections: list) -> None:
             pid = name if count == 0 else f"{name}__{count + 1}"
             seen[name] = count + 1
             tasks[i] = task._replace(pid=pid)
+
+
+def _resolve_colors(sections: list, task_parent: dict) -> None:
+    """Resolve the effective colour of every task, in place, via inheritance.
+
+    Inheritance rules (see the module docstring / the ``color`` column):
+
+    * **Section colour** — a section's colour is the colour of the *first* row
+      belonging to that section that carries a non-blank ``color`` cell, in
+      row order.  (The section header itself has no dedicated row; its colour
+      is established by whichever of its rows first names one.)
+    * **Top-level tasks** — a top-level task with a blank ``color`` cell
+      inherits its section's colour.  A non-blank cell overrides it.
+    * **Subtasks (recursive)** — a subtask with a blank ``color`` cell inherits
+      the *effective* colour of its parent task (which may itself have
+      inherited from a grand-parent or the section).  This trickles down the
+      whole parent chain to sub-sub-…tasks.  A non-blank cell on any task
+      overrides inheritance from that task downwards.
+    * **Default sentinel** — a ``color`` cell equal to :data:`COLOR_DEFAULT_SENTINEL`
+      (case-insensitive, e.g. ``default``) explicitly resets the effective
+      colour to ``None`` (the roadmap default fill), stopping inheritance at
+      that task; its descendants then inherit ``None`` unless they set their
+      own colour.
+
+    A resolved effective colour of ``None`` means "use the roadmap default"
+    (``bar.done_color``).  Non-``None`` values are the raw, still-unresolved
+    colour expressions (``dd:...`` or ``#hex``) — the expression→hex mapping is
+    performed later in the directive, where the palette / dark-mode context is
+    available.
+
+    Parameters
+    ----------
+    sections:
+        The sections list as assembled by :func:`_parse_rows` (mutated in
+        place; each :class:`TaskItem` is replaced with a colour-resolved copy).
+    task_parent:
+        Mapping of task name → parent task name (``None`` for top-level tasks),
+        built during pass 2.  Used to walk the inheritance chain so a subtask
+        inherits its *parent's already-resolved* effective colour regardless of
+        nesting depth.
+    """
+    for _section, tasks in sections:
+        # Section colour = first non-blank, non-sentinel colour cell in order.
+        section_color = None
+        for task in tasks:
+            raw = (task.color or "").strip()
+            if not raw:
+                continue
+            if raw.lower() == COLOR_DEFAULT_SENTINEL:
+                # An explicit default reset does not itself "colour" the
+                # section — it only resets that task; keep looking for a real
+                # colour to establish the section colour.
+                continue
+            section_color = raw
+            break
+
+        # Resolve each task's effective colour.  Subtasks are always inserted
+        # after their parent (and the parent's descendants), so a single
+        # forward pass guarantees a parent is resolved before its children.
+        # ``resolved`` maps a task name to its final effective colour so a
+        # child can look its parent up regardless of nesting depth.
+        resolved: dict = {}
+        for i, task in enumerate(tasks):
+            raw = (task.color or "").strip()
+            parent = task_parent.get(task.name)
+            if parent is not None and parent in resolved:
+                inherited = resolved[parent]
+            else:
+                inherited = section_color
+
+            if not raw:
+                effective = inherited
+            elif raw.lower() == COLOR_DEFAULT_SENTINEL:
+                effective = None
+            else:
+                effective = raw
+
+            tasks[i] = task._replace(color=effective)
+            resolved[task.name] = effective

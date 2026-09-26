@@ -10,7 +10,7 @@ __version__
     Package version string.
 """
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 
 import shlex
 import subprocess
@@ -374,6 +374,10 @@ def setup(app):
                          cfg["period_resolver_hooks"], "env", types=(list,))
     app.add_config_value("doxtr_roadmap_business_days",
                          cfg["business_days"], "env")
+    app.add_config_value("doxtr_roadmap_renderer",
+                         cfg["renderer"], "env")
+    app.add_config_value("doxtr_roadmap_color_resolver",
+                         cfg["color_resolver"], "env")
 
     # PlantUML version check config value
     app.add_config_value(

@@ -23,11 +23,108 @@ from . import period_expr
 from .file_options import split_spec_and_options, parse_file_options, FileOptionError
 from .theme_adapter import get_effective_style
 from .link_resolver import LinkResolver
+from .color_resolver import ColorResolver
 from .tags import parse_tag_list, parse_row_tags, parse_nested_tags, row_matches_filter
 from .config_defaults import _deep_merge
 from .safe_query import evaluate_query, QueryError
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_renderer(dotted):
+    """Resolve the PlantUML renderer callable for a directive.
+
+    ``dotted`` is the value of ``doxtr_roadmap_renderer`` (config key
+    ``renderer`` in the effective config).  When falsy (the default ``None``)
+    the built-in :func:`generator.generate_puml` is returned unchanged.  When
+    set it is a dotted path (``module.callable`` or ``module:callable``) to a
+    drop-in replacement with the same signature as ``generate_puml`` — the
+    single seam a child theme uses to substitute its own renderer without
+    monkeypatching or forking.
+
+    Reuses :func:`period_expr._load_hook` for the dotted-path import so the
+    resolution rules match the existing ``doxtr_roadmap_period_resolver_hooks``
+    behaviour.
+    """
+    if not dotted:
+        return generator.generate_puml
+    return period_expr._load_hook(dotted)
+
+
+def _build_color_resolver(dotted, config, frame_delta):
+    """Resolve the colour-engine callable for a directive.
+
+    ``dotted`` is the value of ``doxtr_roadmap_color_resolver`` (config key
+    ``color_resolver`` in the effective config).  When falsy (the default
+    ``None``) the built-in :meth:`color_resolver.ColorResolver.from_config` is
+    used.  When set it is a dotted path (``module.callable`` or
+    ``module:callable``) to a **factory** ``(config, frame_delta) -> resolver``
+    where *resolver* is a callable with the same contract as
+    :meth:`color_resolver.ColorResolver.resolve`
+    (``(expr, default_done, default_frame) -> (done_hex, frame_hex|None)``).
+
+    This is the single seam a child theme uses to replace the entire
+    colour-expression engine (custom grammar, palette source, brightness
+    algorithm) without monkeypatching or forking — independently of the
+    ``renderer`` seam.  Reuses :func:`period_expr._load_hook` for the
+    dotted-path import so resolution rules match ``renderer`` /
+    ``period_resolver_hooks``.
+
+    Parameters
+    ----------
+    dotted:
+        Dotted path to the resolver factory, or a falsy value for the built-in.
+    config:
+        The Sphinx ``config`` object, passed to the factory.
+    frame_delta:
+        Frame brightness delta (percent), passed to the factory.
+
+    Returns
+    -------
+    callable
+        The resolver callable ``(expr, default_done, default_frame) -> (done, frame)``.
+    """
+    if not dotted:
+        return ColorResolver.from_config(config, frame_delta).resolve
+    factory = period_expr._load_hook(dotted)
+    return factory(config, frame_delta)
+
+
+def _renderer_accepts(render, param_name):
+    """Return True if *render* accepts a keyword argument *param_name*.
+
+    Used to decide whether to pass the (newer) ``color_resolver`` keyword to a
+    renderer.  A renderer that declares the parameter explicitly, or that
+    accepts arbitrary ``**kwargs``, is considered to accept it.  If the
+    signature cannot be introspected (e.g. a C-implemented callable) we
+    conservatively assume it does *not* accept the parameter, so a legacy
+    renderer never receives an unexpected keyword.  A custom renderer that
+    wants forward-compatibility with newer optional keywords (such as
+    ``color_resolver``) should therefore declare ``**kwargs``.
+
+    Parameters
+    ----------
+    render:
+        The resolved renderer callable.
+    param_name:
+        The keyword-argument name to test for.
+
+    Returns
+    -------
+    bool
+    """
+    import inspect
+    try:
+        sig = inspect.signature(render)
+    except (TypeError, ValueError):
+        return False
+    params = sig.parameters
+    if param_name in params:
+        return True
+    return any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+
 
 # Constants for the plantuml output-filename scheme used by sphinxcontrib.plantuml.
 # The filename is: plantuml-<sha1(incdir + _PLANTUML_HASH_SEP + uml)>.png
@@ -724,8 +821,31 @@ class RoadmapDirective(Directive):
             sphinx_app = getattr(env, "app", None) or getattr(env, "_app", None)
         resolver = LinkResolver(sphinx_app)
 
+        # Build the colour resolver: turns each task's inherited ``color``
+        # expression (dd:… semantic or #hex) into concrete bar colours,
+        # reading the active theme-core palette / dark-mode context off the
+        # Sphinx config and deriving the frame colour with the configured
+        # brightness delta.
+        #
+        # A child theme may replace the entire colour engine by setting
+        # ``doxtr_roadmap_color_resolver`` to a dotted path to a factory
+        # ``(config, frame_delta) -> resolver`` (a callable with the same
+        # contract as ``ColorResolver.resolve``).  This is independent of the
+        # ``renderer`` seam, so the colour engine can be swapped without
+        # replacing the whole generator.  Defaults to ``ColorResolver.from_config``.
+        frame_delta = effective_config.get("bar", {}).get(
+            "frame_brightness_delta", 30
+        )
+        color_resolver = _build_color_resolver(
+            effective_config.get("color_resolver"), env.config, frame_delta
+        )
+
         # ---- 7. Generate PlantUML source ----
-        puml_string = generator.generate_puml(
+        # Resolve the renderer seam: a child theme may set
+        # ``doxtr_roadmap_renderer`` to a dotted path replacing the built-in
+        # generator entirely.  Defaults to generator.generate_puml.
+        render = _resolve_renderer(effective_config.get("renderer"))
+        render_kwargs = dict(
             items=items,
             config=effective_config,
             project_start=project_start,
@@ -735,6 +855,23 @@ class RoadmapDirective(Directive):
             title=title,
             link_resolver=resolver.resolve,
         )
+        # ``color_resolver`` is a newer parameter; a custom renderer configured
+        # via ``doxtr_roadmap_renderer`` may predate it.  Only pass it when the
+        # renderer's signature accepts it (or accepts **kwargs) so existing
+        # third-party renderers keep working unchanged.
+        if _renderer_accepts(render, "color_resolver"):
+            render_kwargs["color_resolver"] = color_resolver
+        elif effective_config.get("renderer"):
+            # A custom renderer that cannot receive color_resolver silently
+            # loses per-task colours; log once at DEBUG so authors can discover
+            # they should declare **kwargs (or a color_resolver= parameter).
+            logger.debug(
+                "[doxtr-roadmap] custom renderer %r does not accept a "
+                "'color_resolver' keyword (nor **kwargs); per-task colours "
+                "will not be passed to it. Declare **kwargs to receive them.",
+                effective_config.get("renderer"),
+            )
+        puml_string = render(**render_kwargs)
 
         # ---- 8. Construct plantuml node ----
         import os

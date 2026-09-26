@@ -96,6 +96,53 @@ class TestEstimateLabelDays:
         result = generator._estimate_label_days(name, "monthly", 1.0)
         assert abs(result - 90.0) < 0.01
 
+    # --- zoom ---------------------------------------------------------------
+    def test_zoom_divides_footprint(self):
+        # zoom=2 halves the day-footprint relative to zoom=1 (name long
+        # enough that the _LABEL_MIN_DAYS floor does not dominate either).
+        name = "A" * 10
+        base = generator._estimate_label_days(name, "monthly", 1.0, 1.0)
+        zoomed = generator._estimate_label_days(name, "monthly", 1.0, 2.0)
+        assert abs(zoomed - base / 2) < 0.001
+
+    def test_zoom_default_matches_explicit_one(self):
+        # Omitting zoom must equal passing zoom=1.0 exactly (no behaviour
+        # change for existing callers).
+        name = "Some Task"
+        assert (
+            generator._estimate_label_days(name, "monthly", 1.0)
+            == generator._estimate_label_days(name, "monthly", 1.0, 1.0)
+        )
+
+    def test_zoom_respects_minimum_floor(self):
+        # Even with a large zoom shrinking the footprint, the minimum floor
+        # still applies.
+        result = generator._estimate_label_days("A" * 10, "monthly", 1.0, 1000.0)
+        assert result == generator._LABEL_MIN_DAYS
+
+    def test_non_positive_zoom_treated_as_one(self):
+        base = generator._estimate_label_days("A" * 10, "monthly", 1.0, 1.0)
+        assert generator._estimate_label_days("A" * 10, "monthly", 1.0, 0.0) == base
+        assert generator._estimate_label_days("A" * 10, "monthly", 1.0, -3.0) == base
+
+    def test_nan_zoom_treated_as_one(self):
+        # NaN slips past a plain `zoom <= 0` guard (nan <= 0 is False); the
+        # `math.isfinite` guard must catch it and fall back to zoom=1.
+        base = generator._estimate_label_days("A" * 10, "monthly", 1.0, 1.0)
+        assert (
+            generator._estimate_label_days("A" * 10, "monthly", 1.0, float("nan"))
+            == base
+        )
+
+    def test_inf_zoom_treated_as_one(self):
+        # inf also slips past `zoom <= 0` (inf <= 0 is False) and would
+        # collapse the footprint to 0; the guard must fall back to zoom=1.
+        base = generator._estimate_label_days("A" * 10, "monthly", 1.0, 1.0)
+        assert (
+            generator._estimate_label_days("A" * 10, "monthly", 1.0, float("inf"))
+            == base
+        )
+
 
 # ---------------------------------------------------------------------------
 # _bar_extent
@@ -156,6 +203,16 @@ class TestBarExtent:
         _, right1 = generator._bar_extent(start, end, "Hello", False, "monthly", 1.0, 0)
         _, right2 = generator._bar_extent(start, end, "Hello", False, "monthly", 2.0, 0)
         assert right2 > right1
+
+    def test_zoom_shrinks_right_edge(self):
+        # A short bar whose right edge is label-driven: a higher zoom shrinks
+        # the label's day-footprint, so the right edge moves left.
+        start = _d("2026-01-01")
+        end = _d("2026-01-02")
+        name = "Very Long Task Name Here"
+        _, right1 = generator._bar_extent(start, end, name, False, "monthly", 1.0, 0, 1.0)
+        _, right2 = generator._bar_extent(start, end, name, False, "monthly", 1.0, 0, 2.0)
+        assert right2 < right1
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +295,48 @@ class TestPackLanes:
     def test_empty_members_returns_empty(self):
         lanes = generator._pack_lanes([], "monthly", 1.0, 2)
         assert lanes == []
+
+    def test_zoom_packs_group_that_splits_at_zoom_one(self):
+        # A group whose long labels collide (and split into extra lanes) at
+        # zoom=1 packs onto fewer lanes at a higher zoom, because zoom shrinks
+        # each label's day-footprint.
+        members = [
+            _member("A", "A" * 10, "2026-01-01", "2026-01-10"),
+            _member("B", "B" * 10, "2026-04-01", "2026-04-10"),
+        ]
+        lanes_zoom1 = generator._pack_lanes(members, "monthly", 1.0, 2, 1.0)
+        lanes_zoom8 = generator._pack_lanes(members, "monthly", 1.0, 2, 8.0)
+        assert len(lanes_zoom1) == 2
+        assert len(lanes_zoom8) < len(lanes_zoom1)
+        assert len(lanes_zoom8) == 1
+
+    def test_zoom_default_matches_explicit_one(self):
+        # Default zoom must reproduce the zoom=1.0 lane assignment exactly.
+        members = [
+            _member("A", "A" * 10, "2026-01-01", "2026-01-10"),
+            _member("B", "B" * 10, "2026-04-01", "2026-04-10"),
+        ]
+        default = generator._pack_lanes(members, "monthly", 1.0, 2)
+        explicit = generator._pack_lanes(members, "monthly", 1.0, 2, 1.0)
+        assert [
+            [m["pid"] for m in lane] for lane in default
+        ] == [
+            [m["pid"] for m in lane] for lane in explicit
+        ]
+
+    def test_milestone_group_packs_under_zoom(self):
+        # Milestones have zero bar width, so their extent is purely
+        # label-driven — zoom has a proportionally large effect. Two
+        # long-labelled milestones that collide (2 lanes) at zoom=1 pack
+        # onto a single lane at high zoom.
+        members = [
+            _member("M1", "M" * 12, "2026-01-15", "2026-01-15", is_milestone=True),
+            _member("M2", "N" * 12, "2026-04-15", "2026-04-15", is_milestone=True),
+        ]
+        lanes_zoom1 = generator._pack_lanes(members, "monthly", 1.0, 2, 1.0)
+        lanes_zoom8 = generator._pack_lanes(members, "monthly", 1.0, 2, 8.0)
+        assert len(lanes_zoom1) == 2
+        assert len(lanes_zoom8) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -367,3 +466,46 @@ class TestGeneratePumlIntegration:
         assert "displays on same row as" not in out_default
         # relaxed 0.7 → shared row
         assert "displays on same row as" in out_relaxed
+
+    def test_column_zoom_relaxes_collision(self):
+        """A group that splits at zoom 1 shares a row at higher column-zoom.
+
+        Column zoom widens every column without changing the days each
+        column represents, so a label covers proportionally fewer days on
+        screen.  A collision detected at zoom 1 therefore disappears at a
+        sufficiently high zoom.
+        """
+        items = [("Sec", [
+            ("Long Task Name A", "2026-01-01", "2026-01-10", "", "", False, "grp", "Long Task Name A"),
+            ("Long Task Name B", "2026-02-15", "2026-04-30", "", "", False, "grp", "Long Task Name B"),
+        ])]
+        out_zoom1 = generator.generate_puml(
+            items, _cfg(column_zoom=1),
+            project_start=_d("2026-01-01"), scale="monthly",
+        )
+        out_zoom8 = generator.generate_puml(
+            items, _cfg(column_zoom=8),
+            project_start=_d("2026-01-01"), scale="monthly",
+        )
+        # zoom 1 → collision → split (no same-row directive)
+        assert "displays on same row as" not in out_zoom1
+        # high zoom → labels shrink → fits on one row
+        assert "displays on same row as" in out_zoom8
+
+    def test_column_zoom_one_unchanged(self):
+        """column_zoom=1 (the default) leaves collision output unchanged."""
+        items = [("Sec", [
+            ("Long Task Name A", "2026-01-01", "2026-01-10", "", "", False, "grp", "Long Task Name A"),
+            ("Long Task Name B", "2026-02-15", "2026-04-30", "", "", False, "grp", "Long Task Name B"),
+        ])]
+        out_default = generator.generate_puml(
+            items, _cfg(),
+            project_start=_d("2026-01-01"), scale="monthly",
+        )
+        out_zoom1 = generator.generate_puml(
+            items, _cfg(column_zoom=1),
+            project_start=_d("2026-01-01"), scale="monthly",
+        )
+        # Both split identically; zoom 1 is a no-op for collision detection.
+        assert "displays on same row as" not in out_default
+        assert "displays on same row as" not in out_zoom1

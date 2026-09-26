@@ -331,6 +331,8 @@ def _dark_config_via_get_effective_style():
     config.doxtr_roadmap_period_calendars = dict(DEFAULT_CONFIG["period_calendars"])
     config.doxtr_roadmap_period_resolver_hooks = list(DEFAULT_CONFIG["period_resolver_hooks"])
     config.doxtr_roadmap_business_days = DEFAULT_CONFIG["business_days"]
+    config.doxtr_roadmap_renderer = DEFAULT_CONFIG["renderer"]
+    config.doxtr_roadmap_color_resolver = DEFAULT_CONFIG["color_resolver"]
     return config
 
 
@@ -362,10 +364,17 @@ def test_registered_defaults_do_not_clobber_dark_theme(monkeypatch):
     assert eff["foreground_color"] == "#DBDBDB"       # root FontColor/LineColor
     assert eff["fonts"]["task"]["color"] == "#DBDBDB"
     assert eff["fonts"]["title"]["color"] == "#DBDBDB"
-    # This mock uses an identity invert_color, so undone stays the cream
-    # default here; the real hex_dark_invert path is covered separately in
-    # test_dark_undone_and_foreground_with_real_invert.
-    assert eff["bar"]["undone_color"] == "#FFF3E0"
+    # The undone (remaining) colour is now ALWAYS derived from the done colour:
+    # in dark mode it is undone_brightness_delta percent DARKER than the done
+    # colour (#AABBDE), overriding the theme adapter's inverted-default undone.
+    # This is the authoritative behaviour for the "undone always darker than
+    # done in dark mode" rule.
+    from doxtr_roadmap.color_resolver import derive_undone_color
+    from doxtr_pdf_theme_core.utils import _get_luminance
+    expected_undone = derive_undone_color("#AABBDE", 88.7, dark_mode=True)
+    assert eff["bar"]["undone_color"] == expected_undone
+    # And it must actually be dark (much lower luminance than the done bar).
+    assert _get_luminance(eff["bar"]["undone_color"]) < _get_luminance("#AABBDE")
 
 
 def test_genuine_user_bar_override_still_wins(monkeypatch):

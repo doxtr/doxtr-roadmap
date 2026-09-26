@@ -24,6 +24,7 @@ def _make_config(**kwargs):
         "doxtr_roadmap_link_appendix", "doxtr_roadmap_link_appendix_builders",
         "doxtr_roadmap_link_appendix_title",
         "doxtr_roadmap_figure", "doxtr_roadmap_figure_caption",
+        "doxtr_roadmap_renderer", "doxtr_roadmap_color_resolver",
         "doxtr_semantic_palette", "doxtr_globals",
     ]:
         setattr(cfg, attr, None)
@@ -415,3 +416,95 @@ def test_use_true_no_warning_with_transitive_marker(caplog, monkeypatch):
         style = get_effective_style(cfg)
     assert not any("use_theme_core" in r.message for r in caplog.records)
     assert style["bar"]["done_color"] == "#0055AA"
+
+
+# ---------------------------------------------------------------------------
+# Undone colour derivation (always lighter than done in light, darker in dark)
+# ---------------------------------------------------------------------------
+
+def test_undone_derived_light_mode_default(monkeypatch):
+    """With no dark mode, undone is derived lighter than the default done."""
+    monkeypatch.setattr(
+        "doxtr_pdf_theme_core.get_dark_mode_context",
+        lambda c: {"active": False, "palette": None, "page_color": None,
+                   "text_color": None, "invert_color": lambda x: x},
+        raising=False,
+    )
+    cfg = _make_config(extensions=[])
+    style = get_effective_style(cfg)
+    from doxtr_pdf_theme_core.utils import _get_luminance
+    done = style["bar"]["done_color"]
+    undone = style["bar"]["undone_color"]
+    assert _get_luminance(undone) > _get_luminance(done)
+
+
+def test_undone_derived_from_custom_done(monkeypatch):
+    monkeypatch.setattr(
+        "doxtr_pdf_theme_core.get_dark_mode_context",
+        lambda c: {"active": False, "palette": None, "page_color": None,
+                   "text_color": None, "invert_color": lambda x: x},
+        raising=False,
+    )
+    cfg = _make_config(
+        doxtr_roadmap_bar={"done_color": "#1976D2"},
+        extensions=[],
+    )
+    style = get_effective_style(cfg)
+    from doxtr_roadmap.color_resolver import derive_undone_color
+    assert style["bar"]["undone_color"] == derive_undone_color(
+        "#1976D2", 88.7, dark_mode=False
+    )
+
+
+def test_undone_user_override_wins(monkeypatch):
+    """An explicit undone_color override is never replaced by derivation."""
+    monkeypatch.setattr(
+        "doxtr_pdf_theme_core.get_dark_mode_context",
+        lambda c: {"active": False, "palette": None, "page_color": None,
+                   "text_color": None, "invert_color": lambda x: x},
+        raising=False,
+    )
+    cfg = _make_config(
+        doxtr_roadmap_bar={"done_color": "#FF8C00", "undone_color": "#EEEEEE"},
+        extensions=[],
+    )
+    style = get_effective_style(cfg)
+    assert style["bar"]["undone_color"] == "#EEEEEE"
+
+
+def test_undone_delta_zero_disables_derivation(monkeypatch):
+    """Setting undone_brightness_delta=0 keeps the literal undone_color."""
+    monkeypatch.setattr(
+        "doxtr_pdf_theme_core.get_dark_mode_context",
+        lambda c: {"active": False, "palette": None, "page_color": None,
+                   "text_color": None, "invert_color": lambda x: x},
+        raising=False,
+    )
+    cfg = _make_config(
+        doxtr_roadmap_bar={
+            "done_color": "#FF8C00",
+            "undone_color": "#FFF3E0",
+            "undone_brightness_delta": 0,
+        },
+        extensions=[],
+    )
+    style = get_effective_style(cfg)
+    assert style["bar"]["undone_color"] == "#FFF3E0"
+
+
+def test_undone_derivation_skipped_for_custom_renderer(monkeypatch):
+    """A custom renderer receives the raw undone_color (built-in derivation off)."""
+    monkeypatch.setattr(
+        "doxtr_pdf_theme_core.get_dark_mode_context",
+        lambda c: {"active": False, "palette": None, "page_color": None,
+                   "text_color": None, "invert_color": lambda x: x},
+        raising=False,
+    )
+    cfg = _make_config(
+        doxtr_roadmap_bar={"done_color": "#1976D2"},
+        doxtr_roadmap_renderer="my_theme.roadmap:render",
+        extensions=[],
+    )
+    style = get_effective_style(cfg)
+    # Derivation skipped → the DEFAULT_CONFIG literal undone_color is kept.
+    assert style["bar"]["undone_color"] == DEFAULT_CONFIG["bar"]["undone_color"]

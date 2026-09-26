@@ -332,6 +332,8 @@ def get_effective_style(config) -> dict:
         "period_calendars_options": dict(DEFAULT_CONFIG["period_calendars_options"]),
         "period_resolver_hooks": list(DEFAULT_CONFIG["period_resolver_hooks"]),
         "business_days": DEFAULT_CONFIG["business_days"],
+        "renderer": DEFAULT_CONFIG["renderer"],
+        "color_resolver": DEFAULT_CONFIG["color_resolver"],
         "ignorable_columns": list(DEFAULT_CONFIG["ignorable_columns"]),
     }
 
@@ -430,10 +432,39 @@ def get_effective_style(config) -> dict:
         ("period_calendars_options", "doxtr_roadmap_period_calendars_options"),
         ("period_resolver_hooks", "doxtr_roadmap_period_resolver_hooks"),
         ("business_days", "doxtr_roadmap_business_days"),
+        ("renderer", "doxtr_roadmap_renderer"),
+        ("color_resolver", "doxtr_roadmap_color_resolver"),
         ("ignorable_columns", "doxtr_roadmap_ignorable_columns"),
     ):
         val = getattr(config, cfg_key, None)
         if val is not None:
             effective[simple_key] = val
+
+    # ----- Derive the undone (remaining) bar colour from the done colour -----
+    # The undone colour is ALWAYS ``undone_brightness_delta`` percent lighter
+    # than the done colour in light mode and that much darker in dark mode, so
+    # the completed/remaining portions of every bar keep a consistent look
+    # regardless of the done colour.  A genuine user override of
+    # ``undone_color`` (detected via the bar delta above) always wins, and
+    # setting the delta to 0 disables derivation entirely.
+    #
+    # PlantUML gantt only supports a single global undone background, so this
+    # uses the global ``done_color`` and applies to every bar.
+    #
+    # This built-in derivation only runs for the built-in renderer.  A child
+    # theme that replaces the renderer (``doxtr_roadmap_renderer``) receives
+    # the raw ``undone_color`` untouched and owns all colour maths itself, so
+    # it can opt out of the built-in behaviour simply by supplying its own
+    # renderer (or, for the built-in renderer, by setting the delta to 0).
+    user_set_undone = isinstance(user_bar, dict) and "undone_color" in user_bar
+    delta = effective.get("bar", {}).get("undone_brightness_delta", 0)
+    if delta and not user_set_undone and not effective.get("renderer"):
+        from .color_resolver import derive_undone_color
+        dark_ctx = _get_dark_mode_context(config)
+        dark_active = bool(dark_ctx and dark_ctx.get("active"))
+        done_color = effective.get("bar", {}).get("done_color")
+        derived = derive_undone_color(done_color, delta, dark_active)
+        if derived:
+            effective["bar"]["undone_color"] = derived
 
     return effective

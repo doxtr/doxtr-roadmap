@@ -325,6 +325,7 @@ def _estimate_label_days(
     name: str,
     scale: str,
     char_width_factor: float = 1.0,
+    zoom: float = 1.0,
 ) -> float:
     """Estimate how many calendar days a task's text label spans horizontally.
 
@@ -332,6 +333,13 @@ def _estimate_label_days(
     projectscale, but each scale maps a different number of days to a column.
     A long label that fits on a monthly chart may run over into the adjacent
     bar on a daily chart.
+
+    The ``zoom`` factor (from ``:column-zoom:`` / ``projectscale ... zoom N``)
+    physically widens every column by ``zoom`` without changing how many days
+    a column represents.  A label therefore covers ``zoom`` times *fewer*
+    calendar days on screen, so its estimated day-footprint is divided by
+    ``zoom``.  Keeping this here means ``char_width_factor`` stays a pure
+    user tuning knob and does not have to absorb ``1 / zoom`` by hand.
 
     Parameters
     ----------
@@ -344,6 +352,10 @@ def _estimate_label_days(
         Multiplicative tuning knob.  1.0 uses the calibrated defaults.
         Values > 1 reserve more space (split sooner); values < 1 pack
         more tightly.
+    zoom:
+        PlantUML column zoom factor (``:column-zoom:``).  Values > 1 widen
+        columns and thus shrink the label's day-footprint proportionally.
+        Must be > 0; non-positive or invalid values are treated as 1.0.
 
     Returns
     -------
@@ -351,7 +363,12 @@ def _estimate_label_days(
         Estimated horizontal footprint of the label in calendar days.
     """
     base = _SCALE_DAYS_PER_CHAR.get(scale, _SCALE_DAYS_PER_CHAR["monthly"])
-    days = len(name) * base * char_width_factor
+    # Lightweight self-guard for direct callers; full coercion of config
+    # input (float parsing, non-numeric fallback) is owned by generate_puml.
+    # not math.isfinite(...) also rejects NaN/inf, which slip past `<= 0`.
+    if not math.isfinite(zoom) or zoom <= 0:
+        zoom = 1.0
+    days = len(name) * base * char_width_factor / zoom
     return max(days, _LABEL_MIN_DAYS)
 
 
@@ -363,6 +380,7 @@ def _bar_extent(
     scale: str,
     char_width_factor: float,
     gap_days: int,
+    zoom: float = 1.0,
 ) -> tuple:
     """Return the full horizontal footprint ``(left, right)`` of a task bar.
 
@@ -387,13 +405,15 @@ def _bar_extent(
     gap_days:
         Mandatory clear gap (in calendar days) added to the right edge so
         that adjacent labels on the same lane don't abut.
+    zoom:
+        PlantUML column zoom factor (see :func:`_estimate_label_days`).
 
     Returns
     -------
     tuple
         ``(left_date, right_date)`` — both as :class:`datetime.date`.
     """
-    label_days = _estimate_label_days(name, scale, char_width_factor)
+    label_days = _estimate_label_days(name, scale, char_width_factor, zoom)
     label_end = disp_start + datetime.timedelta(days=math.ceil(label_days))
     if is_milestone:
         right = label_end + datetime.timedelta(days=gap_days)
@@ -429,6 +449,7 @@ def _pack_lanes(
     scale: str,
     char_width_factor: float,
     gap_days: int,
+    zoom: float = 1.0,
 ) -> list:
     """Greedily pack *members* into as few collision-free lanes as possible.
 
@@ -452,6 +473,10 @@ def _pack_lanes(
         Label-width tuning knob.
     gap_days:
         Minimum gap between adjacent bars on the same lane.
+    zoom:
+        PlantUML column zoom factor (see :func:`_estimate_label_days`).
+        Widening columns shrinks each label's day-footprint, so a group
+        that collided at zoom 1 may fit on a single lane at higher zoom.
 
     Returns
     -------
@@ -472,6 +497,7 @@ def _pack_lanes(
             scale,
             char_width_factor,
             gap_days,
+            zoom,
         )
         placed = False
         for lane_members, lane_extents in lanes:
@@ -607,6 +633,133 @@ def resolve_window(
 
 
 # ---------------------------------------------------------------------------
+# PlantUML link-label escaping
+# ---------------------------------------------------------------------------
+
+# Characters / digraphs that are structurally significant inside a PlantUML
+# ``[[url label]]`` link label and must be replaced with HTML entities so that
+# the label text is rendered verbatim.
+#
+# Structural characters
+#   [  ]   — would close/reopen the ``[[...]]`` link syntax
+#   <  >   — HTML/creole tag delimiters; unescaped < starts an inline tag
+#   &      — HTML entity introducer (must be escaped before other replacements
+#            to avoid double-encoding)
+#   '      — Creole / PlantUML quote character
+#   ~      — Creole escape character (tildes escape the next character)
+#   "      — attribute-value delimiter in some PlantUML contexts
+#
+# Creole formatting digraphs trigger inline formatting only when the same
+# digraph appears in at least two non-overlapping occurrences (opening +
+# closing pair):
+#   //text//   — italic
+#   **text**   — bold
+#   __text__   — underline
+#   --text--   — strike-through
+# Presence is detected with ``str.count`` (non-overlapping), so an odd run such
+# as ``"---"`` counts as a single ``--`` occurrence and is left literal — a
+# lone (unpaired) digraph is rendered verbatim and needs no escaping.
+#
+# Replacement order matters: ``&`` must come first so that the ``&`` in every
+# subsequent entity is not re-escaped.
+#
+# Extension note: the digraph characters (``/ * _ -``) must not appear in
+# ``_PLANTUML_LABEL_ESCAPES``.  ``_escape_plantuml_link_label`` detects paired
+# digraphs on the *pre-escape* text, so this coupling is safe even if it were
+# violated, but keeping the tables disjoint keeps the two passes independent.
+_PLANTUML_LABEL_ESCAPES: Tuple[Tuple[str, str], ...] = (
+    ("&",  "&#38;"),   # must be first
+    ("<",  "&#60;"),
+    (">",  "&#62;"),
+    ("[",  "&#91;"),
+    ("]",  "&#93;"),
+    ("'",  "&#39;"),
+    ("~",  "&#126;"),
+    ('"',  "&#34;"),
+)
+
+# Creole formatting digraphs: only escaped when the digraph appears in at least
+# two non-overlapping occurrences in the label (``str.count(...) >= 2``).
+_PLANTUML_CREOLE_DIGRAPHS: Tuple[Tuple[str, str], ...] = (
+    ("//", "&#47;&#47;"),
+    ("**", "&#42;&#42;"),
+    ("__", "&#95;&#95;"),
+    ("--", "&#45;&#45;"),
+)
+
+
+def _sanitize_plantuml_pid(text: str) -> str:
+    """Sanitize a string used inside PlantUML ``[...]`` bracket-identifier syntax.
+
+    PlantUML uses the task name verbatim as both the display label and the
+    internal identifier in ``[name] as [pid]`` declarations.  Square brackets
+    inside either the display name *or* the pid break the ``[...]`` delimiter
+    syntax, so ``[`` and ``]`` are replaced with ``(`` and ``)`` respectively.
+    This helper is therefore applied to *both* the task name and the pid.
+
+    All other characters (including ``&``, ``'``, spaces, parentheses) are
+    valid inside PlantUML task identifiers and are left untouched.
+
+    The replacement rule is intentionally fixed (only ``[`` / ``]`` can break
+    the bracket delimiter); unlike the data-driven label escaping there is no
+    table to extend, because no other character is structurally significant
+    inside an identifier.
+
+    Parameters
+    ----------
+    text:
+        Raw task name or pid string.
+
+    Returns
+    -------
+    str
+        String safe for use inside ``[...]`` PlantUML identifier syntax.
+    """
+    return text.replace("[", "(").replace("]", ")")
+
+
+def _escape_plantuml_link_label(text: str) -> str:
+    """Escape special characters in a PlantUML ``[[url label]]`` link label.
+
+    Replaces characters and digraphs that are structurally significant inside
+    PlantUML's Creole / gantt link syntax with their HTML entity equivalents.
+    PlantUML renders the entities as the original characters in the displayed
+    label, so the visual output is identical to the raw input.
+
+    Structural characters (``& < > [ ] ' ~ "``) are always escaped.
+    Creole formatting digraphs (``// ** __ --``) are only escaped when the
+    digraph appears in at least two non-overlapping occurrences in *text*
+    (``str.count(...) >= 2``), i.e. when an opening and closing pair is present
+    that would trigger inline formatting.  An odd run such as ``"---"`` counts
+    as one ``--`` occurrence and is left literal.
+
+    Digraph presence is computed against the *pre-escape* text (before the
+    single-character pass runs), so the two passes are fully independent: a
+    future digraph built from a character that also lives in
+    ``_PLANTUML_LABEL_ESCAPES`` would still be detected correctly.
+
+    Parameters
+    ----------
+    text:
+        Raw label string (e.g. the resolved xlink title).
+
+    Returns
+    -------
+    str
+        Label safe for direct interpolation into ``[[url <label>]]``.
+    """
+    # Detect paired digraphs on the pre-escape text so single-char escaping
+    # cannot hide a digraph (decouples the two tables).
+    paired = [d for d, _ in _PLANTUML_CREOLE_DIGRAPHS if text.count(d) >= 2]
+    for raw, entity in _PLANTUML_LABEL_ESCAPES:
+        text = text.replace(raw, entity)
+    for raw, entity in _PLANTUML_CREOLE_DIGRAPHS:
+        if raw in paired:
+            text = text.replace(raw, entity)
+    return text
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -619,6 +772,7 @@ def generate_puml(
     close_weekends: bool = False,
     title: str = None,
     link_resolver: LinkResolverCallable = None,
+    color_resolver=None,
 ) -> str:
     """Generate a PlantUML ``@startgantt … @endgantt`` string from roadmap data.
 
@@ -659,6 +813,15 @@ def generate_puml(
         ``None`` when the cell is empty, malformed, or the id cannot be
         resolved.  When ``None``, links are silently skipped (useful in unit
         tests).
+    color_resolver:
+        Optional callable
+        ``(expr, default_done, default_frame) -> (done_hex, frame_hex|None)``
+        used to turn a task's inherited ``color`` expression (a ``dd:``
+        semantic expression or ``#hex`` string) into concrete bar colours,
+        honouring dark mode.  See
+        :meth:`color_resolver.ColorResolver.resolve`.  When ``None`` (e.g. in
+        unit tests) per-task colours are ignored and the section colours are
+        used for every bar.
 
     Returns
     -------
@@ -686,7 +849,7 @@ def generate_puml(
         _zoom = float(_raw_zoom)
     except (TypeError, ValueError):
         _zoom = 1.0
-    if _zoom <= 0:
+    if not math.isfinite(_zoom) or _zoom <= 0:
         _zoom = 1.0
 
     def _fmt_zoom(z: float) -> str:
@@ -756,6 +919,7 @@ def generate_puml(
                 is_subtask = task.is_subtask
                 row_group  = task.row_group
                 pid        = task.pid
+                color_expr = getattr(task, "color", None)
             else:
                 name       = task[0]
                 start_str  = task[1]
@@ -764,6 +928,7 @@ def generate_puml(
                 is_subtask = task[5]
                 row_group  = task[6]
                 pid        = task[7]
+                color_expr = task[8] if len(task) > 8 else None
 
             start = datetime.date.fromisoformat(start_str)
             end   = datetime.date.fromisoformat(end_str)
@@ -783,7 +948,7 @@ def generate_puml(
 
             rendered.append(
                 (name, start, end, disp_start, disp_end, is_milestone,
-                 link_cell, is_subtask, row_group, pid)
+                 link_cell, is_subtask, row_group, pid, color_expr)
             )
 
         if not rendered:
@@ -800,25 +965,35 @@ def generate_puml(
 
         row_groups: dict = {}
         for (name, start, end, disp_start, disp_end, is_milestone,
-             link_cell, _is_subtask, row_group, pid) in rendered:
+             link_cell, _is_subtask, row_group, pid, color_expr) in rendered:
+
+            safe_name = _sanitize_plantuml_pid(name)
+            safe_pid  = _sanitize_plantuml_pid(pid)
 
             if row_group is not None:
                 row_groups.setdefault(row_group, []).append({
-                    "pid": pid,
-                    "name": name,
+                    "pid": safe_pid,
+                    "name": safe_name,
                     "disp_start": disp_start,
                     "disp_end": disp_end,
                     "is_milestone": is_milestone,
                 })
 
+            # Default bar colours come from the section; a per-task ``color``
+            # expression (resolved through color_resolver, honouring dark mode)
+            # overrides both the fill and the derived frame.  When no resolver
+            # is supplied (e.g. unit tests) the section colours are used.
+            done = color_done
             frame = frame_overrides.get(name, section_frame)
-            color_clause = _color_clause(color_done, frame)
+            if color_expr and color_resolver is not None:
+                done, frame = color_resolver(color_expr, color_done, frame)
+            color_clause = _color_clause(done, frame)
 
-            decl = f"[{name}] as [{pid}]"
+            decl = f"[{safe_name}] as [{safe_pid}]"
 
             if is_milestone:
                 lines.append(f"{decl} happens {disp_start.isoformat()}")
-                lines.append(f"[{pid}] is colored in {color_clause}")
+                lines.append(f"[{safe_pid}] is colored in {color_clause}")
             else:
                 pct = percent_complete(
                     disp_start, disp_end,
@@ -828,7 +1003,7 @@ def generate_puml(
                     f"{decl} starts {disp_start.isoformat()} and ends "
                     f"{disp_end.isoformat()} and is colored in {color_clause}"
                 )
-                lines.append(f"[{pid}] is {pct}% completed")
+                lines.append(f"[{safe_pid}] is {pct}% completed")
 
             # Resolve hyperlink
             if link_cell and link_cell.strip() and link_resolver is not None:
@@ -836,9 +1011,10 @@ def generate_puml(
                 if result is not None:
                     url, link_title = result
                     if link_title:
-                        lines.append(f"[{pid}] links to [[{url} {link_title}]]")
+                        safe_title = _escape_plantuml_link_label(link_title)
+                        lines.append(f"[{safe_pid}] links to [[{url} {safe_title}]]")
                     else:
-                        lines.append(f"[{pid}] links to [[{url}]]")
+                        lines.append(f"[{safe_pid}] links to [[{url}]]")
 
         # Pack same-row groups — with optional collision detection
         for members in row_groups.values():
@@ -847,6 +1023,7 @@ def generate_puml(
                     members, scale,
                     collision_char_width_factor,
                     collision_gap_days,
+                    _zoom,
                 )
             else:
                 # Old behaviour: force all members onto one lane regardless

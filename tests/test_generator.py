@@ -437,7 +437,8 @@ def test_placeholder_has_section_separator():
     assert "-- (no matching tasks) --" in out
 
 
-
+def test_pid_collision_distinct_pids():
+    """Two rows sharing a display name keep distinct pids in the decl."""
     items = [("S", [
         ("PI27-01", "2026-11-01", "2027-01-31", "", "", False, None, "PI27-01"),
         ("PI27-01", "2027-02-01", "2027-04-30", "", "", False, None, "PI27-01__2"),
@@ -821,3 +822,333 @@ def test_theme_adapter_attr_fallback():
     from doxtr_roadmap.config_defaults import DEFAULT_CONFIG
     assert style["default_scale"] == DEFAULT_CONFIG["default_scale"]
     assert style["bar"]["done_color"] == DEFAULT_CONFIG["bar"]["done_color"]
+
+
+# ---------------------------------------------------------------------------
+# PlantUML label escaping / pid sanitization
+# ---------------------------------------------------------------------------
+
+def test_sanitize_plantuml_pid_replaces_brackets_in_name():
+    """Square brackets in a task name become parentheses."""
+    assert generator._sanitize_plantuml_pid("Task [WIP]") == "Task (WIP)"
+    assert generator._sanitize_plantuml_pid("[a][b]") == "(a)(b)"
+
+
+def test_sanitize_plantuml_pid_replaces_brackets_in_pid():
+    """The same sanitizer is used for pids (identifier collision safety)."""
+    assert generator._sanitize_plantuml_pid("pid[1]") == "pid(1)"
+
+
+def test_sanitize_plantuml_pid_leaves_other_chars_untouched():
+    """Non-bracket characters (& ' spaces parentheses) are preserved."""
+    raw = "A & B's (note) ~ x"
+    assert generator._sanitize_plantuml_pid(raw) == raw
+
+
+@pytest.mark.parametrize(
+    "raw, entity",
+    [
+        ("&", "&#38;"),
+        ("<", "&#60;"),
+        (">", "&#62;"),
+        ("[", "&#91;"),
+        ("]", "&#93;"),
+        ("'", "&#39;"),
+        ("~", "&#126;"),
+        ('"', "&#34;"),
+    ],
+)
+def test_escape_plantuml_link_label_structural_chars(raw, entity):
+    """Each structural character is escaped to its HTML entity."""
+    assert generator._escape_plantuml_link_label(raw) == entity
+
+
+def test_escape_plantuml_link_label_ampersand_first_no_double_encoding():
+    """`&` is escaped first so entity `&#NN;` sequences are not re-escaped."""
+    # A bare '<' would become '&#60;'. If '&' were escaped after '<', the
+    # leading '&' of '&#60;' would be re-encoded to '&#38;#60;'. Escaping
+    # '&' first prevents that.
+    assert generator._escape_plantuml_link_label("<") == "&#60;"
+    # Combined input: the only '&' entity introducers present after the fact
+    # come from our own replacements and must not be double-encoded.
+    result = generator._escape_plantuml_link_label("a<b>c")
+    assert result == "a&#60;b&#62;c"
+    assert "&#38;#" not in result
+
+
+def test_escape_plantuml_link_label_creole_digraph_only_when_paired():
+    """Creole digraphs are escaped only when a pair is present."""
+    # Lone digraph → NOT escaped (renders literally in PlantUML).
+    assert generator._escape_plantuml_link_label("a // b") == "a // b"
+    assert generator._escape_plantuml_link_label("a--b") == "a--b"
+    # Paired digraph → escaped.
+    assert generator._escape_plantuml_link_label("//x//") == "&#47;&#47;x&#47;&#47;"
+    assert generator._escape_plantuml_link_label("**x**") == "&#42;&#42;x&#42;&#42;"
+    assert generator._escape_plantuml_link_label("__x__") == "&#95;&#95;x&#95;&#95;"
+    assert generator._escape_plantuml_link_label("--x--") == "&#45;&#45;x&#45;&#45;"
+
+
+def test_escape_plantuml_link_label_plain_text_unchanged():
+    """A label with no special characters is returned verbatim."""
+    assert generator._escape_plantuml_link_label("Simple Title") == "Simple Title"
+
+
+# ---------------------------------------------------------------------------
+# Escaping / sanitization — end-to-end through generate_puml
+# ---------------------------------------------------------------------------
+
+def test_generate_puml_sanitizes_bracketed_task_name():
+    """A task name with brackets is sanitized in both the decl and the pid.
+
+    Drives the ``safe_name``/``safe_pid`` wiring through generate_puml so the
+    render loop is covered, not just the unit helper.
+    """
+    items = _items_one_task(name="Task [WIP]", start="2026-02-01",
+                            end="2026-04-30")
+    out = generator.generate_puml(
+        items, _cfg(), project_start=datetime.date(2026, 1, 1)
+    )
+    # Both the display name and the pid are sanitized: '[' -> '(', ']' -> ')'.
+    assert "[Task (WIP)] as [Task (WIP)]" in out
+    # The percent-complete line references the sanitized pid.
+    assert "[Task (WIP)] is " in out
+    # The raw bracketed form never leaks into the output.
+    assert "[Task [WIP]]" not in out
+
+
+def test_generate_puml_escapes_link_title_special_chars():
+    """A resolved link title with special chars is entity-escaped in output."""
+    def resolver(cell):
+        return ("https://example.com", "A & B <x>")
+
+    items = _items_one_task(link=":xlink:`some-id`")
+    out = generator.generate_puml(
+        items, _cfg(), project_start=datetime.date(2026, 1, 1),
+        link_resolver=resolver
+    )
+    assert "links to [[https://example.com A &#38; B &#60;x&#62;]]" in out
+
+
+def test_escape_plantuml_link_label_odd_run_left_literal():
+    """An odd digraph run counts as one occurrence and is left literal.
+
+    Pins the non-overlapping ``str.count(...) >= 2`` decision so a lone
+    (unpaired) digraph is rendered verbatim.
+    """
+    assert generator._escape_plantuml_link_label("a---b") == "a---b"
+
+
+def test_escape_plantuml_link_label_empty_string():
+    """Empty input escapes to empty output."""
+    assert generator._escape_plantuml_link_label("") == ""
+
+
+# ---------------------------------------------------------------------------
+# Renderer seam — doxtr_roadmap_renderer replaces the built-in generator
+# ---------------------------------------------------------------------------
+
+def _custom_renderer(**kwargs):  # pragma: no cover - resolved via dotted path
+    """A stand-in renderer used to prove the seam calls a custom callable."""
+    return "@startgantt\nCUSTOM RENDERER\n@endgantt"
+
+
+def test_resolve_renderer_default_is_generate_puml():
+    """A falsy renderer config resolves to the built-in generate_puml."""
+    from doxtr_roadmap import directive
+    assert directive._resolve_renderer(None) is generator.generate_puml
+    assert directive._resolve_renderer("") is generator.generate_puml
+
+
+def test_resolve_renderer_dotted_path_loads_named_callable():
+    """A dotted path resolves to the built-in generator by its own path.
+
+    Uses the extension's own ``generator.generate_puml`` as the target so the
+    resolved object is compared against a single, stable module instance
+    (avoiding pytest's dual-import of the test module under ``tests.*``).
+    """
+    from doxtr_roadmap import directive
+    resolved = directive._resolve_renderer(
+        "doxtr_roadmap.generator.generate_puml"
+    )
+    assert resolved is generator.generate_puml
+    # Colon form resolves identically.
+    assert directive._resolve_renderer(
+        "doxtr_roadmap.generator:generate_puml"
+    ) is generator.generate_puml
+
+
+def test_resolve_renderer_dotted_path_loads_custom_callable():
+    """A dotted path to a custom renderer resolves and is callable.
+
+    Compared by ``__name__`` + behaviour rather than object identity because
+    pytest may import this test module under a different fully-qualified name
+    than the one used in the dotted path.
+    """
+    from doxtr_roadmap import directive
+    resolved = directive._resolve_renderer(
+        "tests.test_generator._custom_renderer"
+    )
+    assert callable(resolved)
+    assert resolved.__name__ == "_custom_renderer"
+    # The resolved renderer accepts the generate_puml keyword signature.
+    out = resolved(
+        items=_items_one_task(), config=_cfg(),
+        project_start=datetime.date(2026, 1, 1),
+    )
+    assert "CUSTOM RENDERER" in out
+
+
+# ---------------------------------------------------------------------------
+# Per-task colour resolution (color_resolver seam)
+# ---------------------------------------------------------------------------
+
+from doxtr_roadmap.csv_parser import TaskItem
+
+
+def _color_items(color, section="Sec", name="Task A"):
+    """One TaskItem carrying a colour expression."""
+    return [(section, [TaskItem(
+        name=name, start="2026-02-01", end="2026-04-30",
+        link="", tags="", is_subtask=False, row_group=None, pid=name,
+        color=color,
+    )])]
+
+
+def _fake_resolver(expr, default_done, default_frame):
+    """Deterministic stand-in for ColorResolver.resolve (no theme-core)."""
+    mapping = {
+        "dd:primary": ("#3366CC", "#7094DB"),
+        "#123456": ("#123456", "#597189"),
+    }
+    if expr in mapping:
+        return mapping[expr]
+    return default_done, default_frame
+
+
+def test_task_color_overrides_section_done():
+    out = generator.generate_puml(
+        _color_items("dd:primary"), _cfg(),
+        color_resolver=_fake_resolver,
+    )
+    # done/frame clause from the resolver, not the section default #FF8C00.
+    assert "is colored in #3366CC/#7094DB" in out
+    assert "#FF8C00" not in out
+
+
+def test_task_color_hex_with_frame():
+    out = generator.generate_puml(
+        _color_items("#123456"), _cfg(),
+        color_resolver=_fake_resolver,
+    )
+    assert "is colored in #123456/#597189" in out
+
+
+def test_task_color_none_uses_section_default():
+    out = generator.generate_puml(
+        _color_items(None), _cfg(),
+        color_resolver=_fake_resolver,
+    )
+    assert "is colored in #FF8C00" in out
+
+
+def test_task_color_ignored_without_resolver():
+    """Without a resolver, per-task colour is ignored (section default used)."""
+    out = generator.generate_puml(_color_items("dd:primary"), _cfg())
+    assert "is colored in #FF8C00" in out
+
+
+def test_task_color_applies_to_milestone():
+    items = [("Sec", [TaskItem(
+        name="MS", start="2026-02-01", end="2026-02-01",
+        link="", tags="", is_subtask=False, row_group=None, pid="MS",
+        color="dd:primary",
+    )])]
+    out = generator.generate_puml(items, _cfg(), color_resolver=_fake_resolver)
+    assert "[MS] is colored in #3366CC/#7094DB" in out
+
+
+def test_legacy_tuple_without_color_still_works():
+    """8-element legacy tuples (no colour field) render with section colour."""
+    items = _items_one_task()  # 8-tuple form
+    out = generator.generate_puml(items, _cfg(), color_resolver=_fake_resolver)
+    assert "is colored in #FF8C00" in out
+
+
+# ---------------------------------------------------------------------------
+# _renderer_accepts + colour-engine seam (directive helpers)
+# ---------------------------------------------------------------------------
+
+def test_renderer_accepts_explicit_param():
+    from doxtr_roadmap import directive
+    def r(items, config, color_resolver=None):  # noqa: ANN001
+        return ""
+    assert directive._renderer_accepts(r, "color_resolver") is True
+
+
+def test_renderer_accepts_var_keyword():
+    from doxtr_roadmap import directive
+    def r(**kwargs):
+        return ""
+    assert directive._renderer_accepts(r, "color_resolver") is True
+
+
+def test_renderer_accepts_missing_param():
+    from doxtr_roadmap import directive
+    def r(items, config):  # no color_resolver, no **kwargs
+        return ""
+    assert directive._renderer_accepts(r, "color_resolver") is False
+
+
+def test_renderer_accepts_uninspectable_is_false():
+    from doxtr_roadmap import directive
+    # A builtin whose signature cannot be introspected → conservative False.
+    assert directive._renderer_accepts(len, "color_resolver") is False
+
+
+def test_build_color_resolver_default_uses_builtin():
+    """No dotted path → built-in ColorResolver.from_config().resolve callable."""
+    from doxtr_roadmap import directive
+    from unittest.mock import MagicMock
+    cfg = MagicMock()
+    cfg.extensions = []
+    cfg.doxtr_semantic_palette = {}
+    resolver = directive._build_color_resolver(None, cfg, 30)
+    assert callable(resolver)
+    # Behaves like ColorResolver.resolve: None expr → defaults unchanged.
+    assert resolver(None, "#FF8C00", "#AABBCC") == ("#FF8C00", "#AABBCC")
+
+
+def _seam_factory(config, frame_delta):
+    """A custom colour-engine factory for the seam test."""
+    def _resolve(expr, default_done, default_frame):
+        if expr == "brand":
+            return "#0A0B0C", "#111213"
+        return default_done, default_frame
+    return _resolve
+
+
+def test_build_color_resolver_custom_factory():
+    """A dotted path resolves to a custom factory and returns its callable."""
+    from doxtr_roadmap import directive
+    from unittest.mock import MagicMock
+    resolver = directive._build_color_resolver(
+        "tests.test_generator._seam_factory", MagicMock(), 30
+    )
+    assert resolver("brand", "#FF8C00", None) == ("#0A0B0C", "#111213")
+    assert resolver("other", "#FF8C00", "#DEF") == ("#FF8C00", "#DEF")
+
+
+def test_task_color_inside_row_group_resolves():
+    """A coloured task inside a row_group still gets its resolved colour."""
+    items = [("Sec", [
+        TaskItem(name="T1", start="2026-01-01", end="2026-03-31",
+                 link="", tags="", is_subtask=False, row_group="grp",
+                 pid="T1", color="dd:primary"),
+        TaskItem(name="T2", start="2026-04-01", end="2026-06-30",
+                 link="", tags="", is_subtask=False, row_group="grp",
+                 pid="T2", color="#123456"),
+    ])]
+    out = generator.generate_puml(items, _cfg(), color_resolver=_fake_resolver)
+    assert "[T1] as [T1] starts" in out
+    assert "is colored in #3366CC/#7094DB" in out   # T1 dd:primary
+    assert "is colored in #123456/#597189" in out   # T2 hex

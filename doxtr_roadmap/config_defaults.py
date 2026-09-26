@@ -30,6 +30,32 @@ DEFAULT_CONFIG = {
         "done_color": "#FF8C00",
         "undone_color": "#FFF3E0",
         "frame_color": None,
+        # Brightness delta (percent) used to derive a per-task bar *frame*
+        # colour from its resolved done/fill colour when a task sets a
+        # ``color`` (CSV ``color`` column).  A light fill is darkened by this
+        # amount, a dark fill is lightened by it, so the border always
+        # contrasts with the fill (an 80%-black fill gets a lighter frame and
+        # vice-versa).  0 disables per-task frame derivation (the bar keeps
+        # ``frame_color`` / PlantUML's default border).
+        "frame_brightness_delta": 30,
+        # Brightness delta (percent) used to derive the *undone* (remaining)
+        # bar background from the *done* (completed) colour.  The undone colour
+        # is ALWAYS this much lighter than the done colour in light mode and
+        # this much darker in dark mode, so the two portions of every bar keep
+        # a consistent relationship regardless of the done colour.
+        #
+        # The default 88.7 is derived from the historical light-mode pair
+        # done=#FF8C00 / undone=#FFF3E0: lightening #FF8C00 by 88.7% reproduces
+        # ~#FFF3E0 (the average of the informative green/blue channels; red is
+        # already maxed).  Set to 0 to disable derivation and use the literal
+        # ``undone_color`` instead.
+        #
+        # NOTE: PlantUML gantt exposes only a *single, global* undone
+        # background (the ``undone`` style selector); it cannot be set per
+        # task.  The derivation therefore uses the *global* ``done_color`` and
+        # applies to every bar's remaining portion, even bars whose completed
+        # portion is individually coloured via the CSV ``color`` column.
+        "undone_brightness_delta": 88.7,
     },
 
     # ----- Diagram-level background -----------------------------------
@@ -165,6 +191,25 @@ DEFAULT_CONFIG = {
     # | None, tried before the built-in resolvers so users can override any
     # built-in behaviour.  Example: ["mypkg.roadmap_ext.fiscal_year"].
     "period_resolver_hooks": [],
+
+    # Renderer override: dotted path (``module.callable`` or ``module:callable``)
+    # to a function with the same signature as
+    # :func:`generator.generate_puml`.  ``None`` (default) uses the built-in
+    # generator.  A child theme can point this at its own renderer to replace
+    # the entire PlantUML generation without monkeypatching or forking.
+    "renderer": None,
+
+    # Colour-engine override: dotted path (``module.callable`` or
+    # ``module:callable``) to a factory ``(config, frame_delta) -> resolver``
+    # where *resolver* is a callable
+    # ``(expr, default_done, default_frame) -> (done_hex, frame_hex|None)``
+    # (the same contract as :meth:`color_resolver.ColorResolver.resolve`).
+    # ``None`` (default) uses the built-in
+    # :meth:`color_resolver.ColorResolver.from_config`.  A child theme can
+    # point this at its own factory to replace the entire colour-expression
+    # engine (custom grammar, palette source, brightness algorithm) without
+    # monkeypatching or forking, independently of ``renderer``.
+    "color_resolver": None,
 
     # Business-day definition used by relative expressions such as
     # "now()-45 businessdays".  None → Monday–Friday.  Otherwise a list of

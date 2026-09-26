@@ -363,3 +363,199 @@ def test_load_items_from_files_optional_columns_differ_per_file(tmp_path):
     untagged = next(t for t in tasks if t.name == "Untagged Task")
     assert tagged.tags == "eng"
     assert untagged.tags == ""  # missing column => empty string, no crash
+
+
+# ---------------------------------------------------------------------------
+# Colour column + inheritance
+# ---------------------------------------------------------------------------
+
+def _by_name(items):
+    """Flatten all tasks across sections into a {name: TaskItem} map."""
+    return {t.name: t for _s, tasks in items for t in tasks}
+
+
+def test_color_column_parsed():
+    csv_text = (
+        "section,name,start,end,row_group,link,tags,color\n"
+        "Platform,Task A,2027-01-15,2027-04-30,,,eng,dd:primary\n"
+    )
+    items = csv_parser.load_items_from_string(csv_text)
+    task = _by_name(items)["Task A"]
+    assert task.color == "dd:primary"
+
+
+def test_color_missing_column_defaults_none():
+    """A CSV without a color column leaves every task colour at None."""
+    csv_text = (
+        "section,name,start,end\n"
+        "Platform,Task A,2027-01-15,2027-04-30\n"
+    )
+    items = csv_parser.load_items_from_string(csv_text)
+    assert _by_name(items)["Task A"].color is None
+
+
+def test_section_color_from_first_colored_row():
+    """The section colour is the first non-blank colour cell in the section.
+
+    Later blank rows in the same section inherit it (matches the spec:
+    'Backend Overhaul 2' inherits dd:primary from 'Backend Overhaul').
+    """
+    csv_text = (
+        "section,name,start,end,row_group,link,tags,color\n"
+        "Platform,Backend Overhaul,2027-01-15,2027-04-30,,,eng,dd:primary\n"
+        "Platform,Backend Overhaul 2,2027-05-01,2027-06-30,,,eng,\n"
+        "DefaultColor,Backend Overhaul 3,2027-01-15,2027-04-30,,,eng,\n"
+    )
+    items = csv_parser.load_items_from_string(csv_text)
+    m = _by_name(items)
+    assert m["Backend Overhaul"].color == "dd:primary"
+    assert m["Backend Overhaul 2"].color == "dd:primary"
+    assert m["Backend Overhaul 3"].color is None
+
+
+def test_section_color_uses_first_even_if_not_first_row():
+    """A blank first row still lets a later coloured row set the section colour."""
+    csv_text = (
+        "section,name,start,end,row_group,link,tags,color\n"
+        "S,First,2027-01-01,2027-01-31,,,,\n"
+        "S,Second,2027-02-01,2027-02-28,,,,#123456\n"
+        "S,Third,2027-03-01,2027-03-31,,,,\n"
+    )
+    items = csv_parser.load_items_from_string(csv_text)
+    m = _by_name(items)
+    # 'First' precedes the coloured row, so it inherits the section colour too.
+    assert m["First"].color == "#123456"
+    assert m["Second"].color == "#123456"
+    assert m["Third"].color == "#123456"
+
+
+def test_color_inheritance_recursive_subtasks():
+    """Colour trickles down the parent chain for arbitrarily deep subtasks."""
+    csv_text = (
+        "section,name,start,end,row_group,link,tags,color\n"
+        "Platform,Parent,2027-01-15,2027-04-30,,,,#123456\n"
+        "Parent,Child,2027-01-15,2027-02-28,,,,\n"
+        "Child,GrandChild,2027-01-15,2027-01-31,,,,\n"
+    )
+    items = csv_parser.load_items_from_string(csv_text)
+    m = _by_name(items)
+    assert m["Parent"].color == "#123456"
+    assert m["Child"].color == "#123456"
+    assert m["GrandChild"].color == "#123456"
+    # And the whole tree is one section with three tasks (recursive nesting).
+    assert len(items) == 1
+    assert len(items[0][1]) == 3
+
+
+def test_color_override_mid_chain_inherits_downward():
+    """A new colour mid-chain overrides and is inherited by deeper tasks."""
+    csv_text = (
+        "section,name,start,end,row_group,link,tags,color\n"
+        "Platform,Parent,2027-01-15,2027-04-30,,,,#111111\n"
+        "Parent,Child,2027-01-15,2027-02-28,,,,#222222\n"
+        "Child,GrandChild,2027-01-15,2027-01-31,,,,\n"
+    )
+    items = csv_parser.load_items_from_string(csv_text)
+    m = _by_name(items)
+    assert m["Parent"].color == "#111111"
+    assert m["Child"].color == "#222222"
+    assert m["GrandChild"].color == "#222222"  # inherits the new mid-chain colour
+
+
+def test_color_default_sentinel_resets():
+    """A 'default' colour cell resets the effective colour to None."""
+    csv_text = (
+        "section,name,start,end,row_group,link,tags,color\n"
+        "Platform,Parent,2027-01-15,2027-04-30,,,,dd:primary\n"
+        "Platform,Reset,2027-05-01,2027-05-31,,,,default\n"
+    )
+    items = csv_parser.load_items_from_string(csv_text)
+    m = _by_name(items)
+    assert m["Parent"].color == "dd:primary"
+    assert m["Reset"].color is None
+
+
+def test_color_default_sentinel_resets_subtask_and_descendants():
+    """A subtask reset to default stops inheritance; its children inherit None."""
+    csv_text = (
+        "section,name,start,end,row_group,link,tags,color\n"
+        "Platform,Parent,2027-01-15,2027-04-30,,,,#123456\n"
+        "Parent,Child,2027-01-15,2027-02-28,,,,default\n"
+        "Child,GrandChild,2027-01-15,2027-01-31,,,,\n"
+    )
+    items = csv_parser.load_items_from_string(csv_text)
+    m = _by_name(items)
+    assert m["Parent"].color == "#123456"
+    assert m["Child"].color is None
+    assert m["GrandChild"].color is None
+
+
+def test_color_default_sentinel_case_insensitive():
+    csv_text = (
+        "section,name,start,end,row_group,link,tags,color\n"
+        "Platform,A,2027-01-15,2027-04-30,,,,dd:primary\n"
+        "Platform,B,2027-05-01,2027-05-31,,,,DEFAULT\n"
+    )
+    items = csv_parser.load_items_from_string(csv_text)
+    assert _by_name(items)["B"].color is None
+
+
+def test_color_default_sentinel_not_section_color():
+    """A leading 'default' cell must not become the section colour."""
+    csv_text = (
+        "section,name,start,end,row_group,link,tags,color\n"
+        "S,A,2027-01-01,2027-01-31,,,,default\n"
+        "S,B,2027-02-01,2027-02-28,,,,#ABCDEF\n"
+        "S,C,2027-03-01,2027-03-31,,,,\n"
+    )
+    items = csv_parser.load_items_from_string(csv_text)
+    m = _by_name(items)
+    assert m["A"].color is None          # explicit reset
+    assert m["B"].color == "#ABCDEF"
+    assert m["C"].color == "#ABCDEF"     # inherits the real section colour
+
+
+def test_color_inheritance_siblings_and_deep_nesting():
+    """Sibling subtasks + a grandchild resolve independently (shift-positions).
+
+    Parent(#111) → ChildA(#222) → GrandA (inherits #222)
+                 → ChildB (inherits #111 from parent, not ChildA)
+    Exercises _shift_positions: inserting GrandA after ChildA must not
+    mis-associate ChildB's parent, and ChildB must inherit the parent colour
+    rather than its sibling's.
+    """
+    csv_text = (
+        "section,name,start,end,row_group,link,tags,color\n"
+        "Work,Parent,2027-01-01,2027-06-30,,,,#111111\n"
+        "Parent,ChildA,2027-01-01,2027-03-31,,,,#222222\n"
+        "ChildA,GrandA,2027-01-01,2027-02-15,,,,\n"
+        "Parent,ChildB,2027-04-01,2027-06-30,,,,\n"
+    )
+    items = csv_parser.load_items_from_string(csv_text)
+    assert len(items) == 1
+    section, tasks = items[0]
+    m = {t.name: t for t in tasks}
+    assert m["Parent"].color == "#111111"
+    assert m["ChildA"].color == "#222222"
+    assert m["GrandA"].color == "#222222"   # inherits ChildA (its parent)
+    assert m["ChildB"].color == "#111111"   # inherits Parent, NOT sibling ChildA
+    # Order: Parent, ChildA, GrandA, ChildB (grandchild nested under ChildA).
+    assert [t.name for t in tasks] == ["Parent", "ChildA", "GrandA", "ChildB"]
+    # Depth flags: all three descendants are subtasks; Parent is not.
+    assert m["Parent"].is_subtask is False
+    assert all(m[n].is_subtask for n in ("ChildA", "GrandA", "ChildB"))
+
+
+def test_color_field_index_pinned():
+    """Guard the generator's positional tuple fallback: color must stay last.
+
+    generator.generate_puml reads task[8] for the colour of a legacy tuple, so
+    TaskItem.color must remain field index 8.  If a future field is inserted
+    before it, this test fails loudly rather than the generator silently
+    misreading positions.
+    """
+    assert csv_parser.TaskItem._fields.index("color") == 8
+    assert csv_parser.TaskItem._fields == (
+        "name", "start", "end", "link", "tags",
+        "is_subtask", "row_group", "pid", "color",
+    )

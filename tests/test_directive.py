@@ -3078,3 +3078,91 @@ def test_directive_period_ref_bad_calendar_errors_gracefully(tmp_path):
     assert "period reference" in combined or "doxtr-roadmap error" in combined, (
         f"expected a graceful directive error; warnings: {warnings}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Per-task colour column (color_resolver integration)
+# ---------------------------------------------------------------------------
+
+@skip_no_plantuml
+def test_directive_hex_color_column(tmp_path):
+    """A hex `color` cell sets the bar done colour (with a derived frame)."""
+    rst = textwrap.dedent("""\
+        .. roadmap::
+
+           section,name,start,end,row_group,link,tags,color
+           Work,Task A,2026-01-01,2026-03-31,,,,#123456
+    """)
+    conf = "doxtr_roadmap_default_start = '2026-01-01'\n"
+    app, warnings, src = _make_project(tmp_path, rst, extra_conf=conf)
+    nodes = _get_plantuml_nodes(app)
+    uml = nodes[0]["uml"]
+    assert "is colored in #123456" in uml
+    # Section default (#FF8C00) must not be used for this coloured task.
+    assert "is colored in #FF8C00" not in uml
+
+
+@skip_no_plantuml
+def test_directive_color_inherits_within_section(tmp_path):
+    """A blank colour row inherits the section's first coloured row."""
+    rst = textwrap.dedent("""\
+        .. roadmap::
+
+           section,name,start,end,row_group,link,tags,color
+           Work,Task A,2026-01-01,2026-03-31,,,,#2E7D32
+           Work,Task B,2026-04-01,2026-06-30,,,,
+    """)
+    conf = "doxtr_roadmap_default_start = '2026-01-01'\n"
+    app, warnings, src = _make_project(tmp_path, rst, extra_conf=conf)
+    uml = _get_plantuml_nodes(app)[0]["uml"]
+    # Both bars use the inherited section colour.
+    assert uml.count("is colored in #2E7D32") == 2
+
+
+@skip_no_plantuml
+def test_directive_color_default_sentinel(tmp_path):
+    """A `default` colour cell reverts a task to the roadmap default fill."""
+    rst = textwrap.dedent("""\
+        .. roadmap::
+
+           section,name,start,end,row_group,link,tags,color
+           Work,Task A,2026-01-01,2026-03-31,,,,#2E7D32
+           Work,Task B,2026-04-01,2026-06-30,,,,default
+    """)
+    conf = "doxtr_roadmap_default_start = '2026-01-01'\n"
+    app, warnings, src = _make_project(tmp_path, rst, extra_conf=conf)
+    uml = _get_plantuml_nodes(app)[0]["uml"]
+    assert "is colored in #2E7D32" in uml   # Task A
+    assert "is colored in #FF8C00" in uml    # Task B reset to default
+
+
+# ---------------------------------------------------------------------------
+# Custom colour-engine seam (doxtr_roadmap_color_resolver)
+# ---------------------------------------------------------------------------
+
+def _custom_color_factory(config, frame_delta):  # pragma: no cover - dotted-path
+    """Custom colour-engine factory used to prove the seam is honoured."""
+    def _resolve(expr, default_done, default_frame):
+        if expr == "brand":
+            return "#0A0B0C", "#111213"
+        return default_done, default_frame
+    return _resolve
+
+
+@skip_no_plantuml
+def test_directive_custom_color_resolver_seam(tmp_path):
+    """`doxtr_roadmap_color_resolver` replaces the built-in colour engine."""
+    rst = textwrap.dedent("""\
+        .. roadmap::
+
+           section,name,start,end,row_group,link,tags,color
+           Work,Task A,2026-01-01,2026-03-31,,,,brand
+    """)
+    conf = (
+        "doxtr_roadmap_default_start = '2026-01-01'\n"
+        "doxtr_roadmap_color_resolver = "
+        "'tests.test_directive._custom_color_factory'\n"
+    )
+    app, warnings, src = _make_project(tmp_path, rst, extra_conf=conf)
+    uml = _get_plantuml_nodes(app)[0]["uml"]
+    assert "is colored in #0A0B0C/#111213" in uml

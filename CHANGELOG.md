@@ -5,6 +5,88 @@ All notable changes to `doxtr-roadmap` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] — 2026-09-26
+
+### Added
+
+- **Automatic *undone* (remaining) bar colour derived from the *done* colour**
+  — the remaining portion of every bar is now always
+  `doxtr_roadmap_bar["undone_brightness_delta"]` percent *lighter* than the
+  done colour in light mode and that much *darker* in dark mode, keeping the
+  completed/remaining relationship consistent for any done colour. The new
+  `undone_brightness_delta` key defaults to `88.7` (derived from the historical
+  `done=#FF8C00` / `undone=#FFF3E0` pair); set it to `0` to disable derivation
+  and use the literal `undone_color`. A genuine user `undone_color` override
+  always wins. NOTE: PlantUML gantt exposes only a single *global* undone
+  background (there is no per-task undone selector), so the derivation uses the
+  global `done_color` and applies to every bar's remaining portion — even bars
+  whose completed portion is individually coloured via the CSV `color` column.
+- **Per-task / per-section colours via a CSV `color` column** — an optional
+  `color` column lets each roadmap row set its bar's *done* (fill) colour
+  directly from the data. Values may be a semantic `doxtr_pdf_theme_core`
+  expression (`dd:primary`, `dd:#FFCC00:lighten:80`, …) or a hex colour
+  (`#123456`, `#4567896F` with alpha). A matching *frame* border is derived
+  automatically by lightening or darkening the fill; the direction is chosen
+  for headroom (a near-black fill is lightened, a near-white fill darkened),
+  and the magnitude is configurable via the new
+  `doxtr_roadmap_bar["frame_brightness_delta"]` key (default `30`).
+  Colour **inheritance**: a section's colour is the first coloured row in that
+  section; a subtask with no colour inherits its parent's effective colour
+  recursively (sub-sub-…tasks included); a mid-chain colour overrides from that
+  task downward; and the sentinel `color=default` resets a task back to the
+  roadmap default, stopping inheritance. Semantic colours resolve against the
+  active light/dark palette, and raw hex colours are soft-inverted in dark
+  mode. When `doxtr_pdf_theme_core` is not installed a `dd:` colour warns once
+  and falls back to the default colour; raw hex still works. Delivered by a new
+  `color_resolver` module and a matching optional `color_resolver` parameter on
+  `generator.generate_puml` (custom renderers that predate it keep working — it
+  is only passed when the renderer's signature accepts it).
+- **Recursive subtask nesting** — a subtask may now itself parent deeper
+  subtasks (sub-sub-…tasks) to arbitrary depth. Previously only one level of
+  nesting was recognised and a row referencing a subtask as its parent was
+  mis-detected as a new section.
+- **Colour-engine replacement seam (`doxtr_roadmap_color_resolver`)** — a new
+  config value (default `None`) accepting a dotted path to a factory
+  `(config, frame_delta) -> resolver` (a callable with the same contract as
+  `color_resolver.ColorResolver.resolve`). Lets a child theme replace the
+  entire colour-expression engine (custom grammar, palette source, brightness
+  algorithm) independently of the renderer, without monkeypatching or forking.
+  The built-in *undone*-colour derivation now runs only for the built-in
+  renderer, so a custom renderer receives the raw config and owns its colour
+  maths.
+- **Renderer replacement seam (`doxtr_roadmap_renderer`)** — a new config value
+  (default `None`) accepting a dotted path (`module.callable` or
+  `module:callable`) to a callable with the same signature as
+  `generator.generate_puml`. When set, it fully replaces the built-in PlantUML
+  generation, so a child theme can supply its own renderer without
+  monkeypatching or forking. When unset the built-in generator is used
+  unchanged.
+
+### Fixed
+
+- **Collision detection now accounts for `:column-zoom:`** — label
+  day-footprints are divided by the effective zoom factor in
+  `_estimate_label_days` (and threaded through `_bar_extent` / `_pack_lanes`).
+  Because `zoom` physically widens every column without changing how many days
+  a column represents, a label covers `zoom` times fewer calendar days on
+  screen. Previously the detector over-estimated label width at high zoom,
+  reported phantom collisions, and split same-row groups onto extra lanes;
+  `:collision-char-width-factor:` no longer needs manual `1/zoom` compensation.
+  The guard also treats non-finite (`NaN`/`inf`) and non-positive zoom values
+  as `1.0`. Behaviour at zoom 1 is unchanged.
+
+- **PlantUML special-character escaping / task-id sanitization** — task names
+  and resolved link titles are now escaped/sanitized before being written into
+  the generated PlantUML source, so characters that are structurally
+  significant to PlantUML render verbatim instead of corrupting the diagram.
+  Square brackets in a task name or its internal id are replaced with
+  parentheses (they cannot break the `[name] as [pid]` delimiters), and
+  structural characters in a link title (`& < > [ ] ' ~ "`) plus paired Creole
+  formatting digraphs (`//`, `**`, `__`, `--`, escaped only when they appear in
+  at least two non-overlapping occurrences) are replaced with HTML entities
+  that PlantUML renders back as the original characters. Link titles such as
+  `A & B <x>` are now safe.
+
 ## [0.1.3] — 2026-09-20
 
 ### Added
